@@ -12,6 +12,10 @@ class PulseShape:
         self.config = config
 
     def generate_pulse_shape(self, sample_rate: float, symbol_time: float):
+        if sample_rate <= 0:
+            raise ValueError("sample_rate must be positive")
+        if symbol_time <= 0:
+            raise ValueError("symbol_time must be positive")
         if self.config.pulse_shape_type == "rect":
             rect_pulse = self.generate_rect_pulse(sample_rate, symbol_time)
             return rect_pulse
@@ -19,7 +23,7 @@ class PulseShape:
             raise ValueError(f"Unknown pulse shape type: {self.config.pulse_shape_type}")
 
     def generate_rect_pulse(self, sample_rate: float, symbol_time: float) -> np.ndarray:
-        rect_pulse = np.ones(int(sample_rate * symbol_time))
+        rect_pulse = np.ones(round(sample_rate * symbol_time), dtype=np.float32)
         normalized_pulse = self.normalize_pulse(rect_pulse)
         return normalized_pulse
 
