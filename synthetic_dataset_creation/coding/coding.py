@@ -4,7 +4,7 @@ from typing import Dict, Tuple, Union
 import numpy as np
 import pydantic
 
-from constellation.constellation import Constellation, ConstellationConfig
+from synthetic_dataset_creation.constellation.constellation import Constellation, ConstellationConfig
 
 BitTuple = Tuple[int, ...]
 
