@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Union
 
 import numpy as np
 import pydantic
@@ -7,7 +7,7 @@ import pydantic
 class ChannelConfig(pydantic.BaseModel):
     channel_type: Literal["awgn"]
     snr_db: float
-    random_seed: int | None = None
+    random_seed: Union[int, None] = None
 
 
 class Channel:
