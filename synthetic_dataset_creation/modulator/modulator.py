@@ -2,6 +2,7 @@ from typing import Optional
 
 import numpy as np
 import pydantic
+import matplotlib.pyplot as plt
 
 from synthetic_dataset_creation.channel.channel import ChannelConfig, Channel
 from synthetic_dataset_creation.coding.coding import CodingConfig, Coding
@@ -43,11 +44,6 @@ class Modulator:
 
         message = message.astype(np.float32)
 
-        if fm_cfg.normalize_message:
-            peak = np.max(np.abs(message))
-            if peak > 0:
-                message = message / peak
-
         n = np.arange(len(message), dtype=np.float32)
         t = n / sample_rate
 
@@ -88,23 +84,5 @@ class Modulator:
         transmitted_signal = self._channel_instance.transmit(modulated_signal)
 
         return transmitted_signal
-
-if __name__ == '__main__':
-    pulse_shape_config = PulseShapeConfig(pulse_shape_type="rect", normalization_type="cpfsk")
-    constellation_config = ConstellationConfig(constellation_type="PAM", constellation_order=2)
-    channel_config = ChannelConfig(channel_type="awgn", snr_db=30, random_seed=None)
-    fm_config = FMConfig(frequency_offset=0, frequency_sensitivity=1, amplitude=1, normalize_message=True)
-    modulator_config = ModulatorConfig(pulse_shape_config=pulse_shape_config, constellation_config=constellation_config,
-                                       channel_config=channel_config, fm_config=fm_config)
-
-    modulator_instance = Modulator(modulator_config)
-
-    n_bits_to_transmit = 256
-    symbol_time = 0.1
-    sample_rate = 100
-    bits = np.random.randint(0, 2, n_bits_to_transmit)
-
-    modulated_signal = modulator_instance.modulate(bits, symbol_time, sample_rate, apply_fm=True)
-    pass
 
 
