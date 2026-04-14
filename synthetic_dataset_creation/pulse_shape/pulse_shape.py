@@ -12,10 +12,6 @@ class PulseShape:
         self.config = config
 
     def generate_pulse_shape(self, sample_rate: float, symbol_time: float):
-        if sample_rate <= 0:
-            raise ValueError("sample_rate must be positive")
-        if symbol_time <= 0:
-            raise ValueError("symbol_time must be positive")
         if self.config.pulse_shape_type == "rect":
             rect_pulse = self.generate_rect_pulse(sample_rate, symbol_time)
             return rect_pulse
