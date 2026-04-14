@@ -12,7 +12,6 @@ from synthetic_dataset_creation.pulse_shape.pulse_shape import PulseShapeConfig,
 class FMConfig(pydantic.BaseModel):
     frequency_offset: float = 0.0
     frequency_sensitivity: float = 1.0
-    normalize_message: bool = True
 
 
 class ModulatorConfig(pydantic.BaseModel):
@@ -50,7 +49,7 @@ class Modulator:
         total_phase = phase_offset + phase_message
 
         # Complex baseband output
-        signal = fm_cfg.amplitude * np.exp(1j * total_phase)
+        signal = np.exp(1j * total_phase)
         return signal
 
     def modulate(self, bits: np.ndarray, symbol_time: float, sample_rate: float, apply_fm: bool = False) -> np.ndarray:
@@ -60,7 +59,7 @@ class Modulator:
         constellation_points = self._constellation_instance.generate_constellation_points()
         symbols = self._coding_instance.generate_bits_to_symbols(bits, constellation_points)
 
-        sps = symbol_time * sample_rate
+        sps = int(symbol_time * sample_rate)
 
         upsampled_symbols = np.zeros(symbols.shape[0] * sps, dtype=symbols.dtype)
         upsampled_symbols[::sps] = symbols
