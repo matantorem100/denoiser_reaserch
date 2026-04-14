@@ -6,41 +6,38 @@ import pydantic
 
 class ChannelConfig(pydantic.BaseModel):
     channel_type: Literal["awgn"]
+    bits_per_symbol: int
+    sps: int
     snr_db: float
-    random_seed: Union[int, None] = None
 
 
 class Channel:
     def __init__(self, config: ChannelConfig):
         self.config = config
-        self.rng = np.random.default_rng(config.random_seed)
 
     def transmit(self, signal: np.ndarray) -> np.ndarray:
-        signal = np.asarray(signal)
-
-        if signal.ndim != 1:
-            raise ValueError("signal must be a 1D numpy array")
 
         if self.config.channel_type == "awgn":
             return self._apply_awgn(signal)
 
         raise ValueError(f"Unknown channel type: {self.config.channel_type}")
 
-
     def _apply_awgn(self, signal: np.ndarray) -> np.ndarray:
-        signal_power = np.mean(np.abs(signal) ** 2)
 
-        if signal_power == 0:
-            raise ValueError("Cannot add AWGN to a zero-power signal")
+        bits_per_symbol = self.config.bits_per_symbol
+        sps = self.config.sps
+        n_symbols = signal.shape[0] / sps
 
-        snr_linear = 10 ** (self.config.snr_db / 10)
-        noise_power = signal_power / snr_linear
+        es = np.sum(np.abs(signal) ** 2) / n_symbols
+        eb = es / bits_per_symbol
+        eb_n0_linear = 10 ** (self.config.snr_db / 10.0)
+        n0 = eb / eb_n0_linear
 
         if np.iscomplexobj(signal):
-            noise_std = np.sqrt(noise_power / 2)
-            noise = noise_std * (self.rng.standard_normal(signal.shape) + 1j * self.rng.standard_normal(signal.shape))
+            noise_std = np.sqrt(n0 / 2.0)
+            noise = noise_std * (np.random.randn(signal.shape[0]) + 1j * np.random.randn(signal.shape[0]))
         else:
-            noise_std = np.sqrt(noise_power)
-            noise = noise_std * self.rng.standard_normal(signal.shape)
+            noise_std = np.sqrt(n0 / 2.0)
+            noise = noise_std * np.random.randn(signal.shape[0])
 
         return signal + noise
