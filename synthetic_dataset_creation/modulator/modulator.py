@@ -12,7 +12,6 @@ from synthetic_dataset_creation.pulse_shape.pulse_shape import PulseShapeConfig,
 class FMConfig(pydantic.BaseModel):
     frequency_offset: float = 0.0
     frequency_sensitivity: float = 1.0
-    amplitude: float = 1.0
     normalize_message: bool = True
 
 
