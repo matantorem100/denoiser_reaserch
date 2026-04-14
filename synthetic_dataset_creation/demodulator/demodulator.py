@@ -8,7 +8,7 @@ from synthetic_dataset_creation.constellation.constellation import Constellation
 from synthetic_dataset_creation.pulse_shape.pulse_shape import PulseShape, PulseShapeConfig
 
 
-class FMConfig(pydantic.BaseModel):
+class FMConfigDemod(pydantic.BaseModel):
     frequency_offset: float = 0.0
     modulation_index: float = 0.5
 
@@ -16,7 +16,7 @@ class FMConfig(pydantic.BaseModel):
 class DemodulatorConfig(pydantic.BaseModel):
     pulse_shape_config: PulseShapeConfig
     constellation_config: ConstellationConfig
-    fm_config: Optional[FMConfig] = None
+    fm_config: Optional[FMConfigDemod] = None
 
 
 class Demodulator:
@@ -32,25 +32,7 @@ class Demodulator:
 
         fm_cfg = self.config.fm_config
 
-        rx_signal = np.asarray(rx_signal)
-        if rx_signal.ndim != 1:
-            raise ValueError("rx_signal must be a 1D numpy array")
-        if rx_signal.size == 0:
-            raise ValueError("rx_signal must not be empty")
-        if not np.iscomplexobj(rx_signal):
-            raise ValueError("FM baseband demod expects a complex-valued signal")
-        if fm_cfg.modulation_index == 0:
-            raise ValueError("modulation_index must be non-zero")
-
-        rx_signal = rx_signal.astype(np.complex128, copy=False)
-
-        # Remove amplitude variation before phase extraction
-        mag = np.abs(rx_signal)
-        valid = mag > 0
-        normalized = np.zeros_like(rx_signal, dtype=np.complex128)
-        normalized[valid] = rx_signal[valid] / mag[valid]
-
-        phase = np.unwrap(np.angle(normalized))
+        phase = np.unwrap(np.angle(rx_signal))
 
         # Per-sample phase increment. Keep same output length.
         dphase = np.diff(phase, prepend=phase[0])
@@ -64,29 +46,11 @@ class Demodulator:
 
         return message.astype(np.float64)
 
-    def demodulate(
-        self,
-        rx_signal: np.ndarray,
-        symbol_time: float,
-        sample_rate: float,
-        apply_fm: bool = False,
-    ) -> np.ndarray:
-        rx_signal = np.asarray(rx_signal)
+    def demodulate(self, rx_signal: np.ndarray, symbol_time: float, sample_rate: float, apply_fm: bool = False) -> np.ndarray:
 
-        if rx_signal.ndim != 1:
-            raise ValueError("rx_signal must be a 1D numpy array")
-        if rx_signal.size == 0:
-            raise ValueError("rx_signal must not be empty")
-        if sample_rate <= 0:
-            raise ValueError("sample_rate must be positive")
-        if symbol_time <= 0:
-            raise ValueError("symbol_time must be positive")
+        sps = symbol_time * sample_rate
 
-        sps = round(symbol_time * sample_rate)
-        if sps < 1:
-            raise ValueError("sample_rate * symbol_time must be at least 1")
-
-        # Step 1: FM demod if needed
+        # FM demod if needed
         if apply_fm:
             rx_signal = self._fm_demodulate_baseband(rx_signal, sample_rate)
 
@@ -105,9 +69,6 @@ class Demodulator:
         n_expected_symbols = max(n_expected_symbols, 0)
         detected_symbols = detected_symbols[:n_expected_symbols]
 
-        bits = self._coding_instance.generate_symbols_to_bits(
-            detected_symbols,
-            constellation_points,
-        )
+        bits = self._coding_instance.generate_symbols_to_bits(detected_symbols, constellation_points)
 
         return bits
