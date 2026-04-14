@@ -2,7 +2,6 @@ from typing import Optional
 
 import numpy as np
 import pydantic
-import matplotlib.pyplot as plt
 
 from synthetic_dataset_creation.channel.channel import ChannelConfig, Channel
 from synthetic_dataset_creation.coding.coding import CodingConfig, Coding
@@ -38,21 +37,15 @@ class Modulator:
 
         fm_cfg = self.config.fm_config
 
-        message = np.asarray(message)
         if np.iscomplexobj(message):
             raise ValueError("FM must be real-valued.")
 
-        message = message.astype(np.float32)
+        t = np.arange(len(message), dtype=np.float32) / sample_rate
 
-        n = np.arange(len(message), dtype=np.float32)
-        t = n / sample_rate
-
-        # Residual/baseband frequency offset term:
-        # 2*pi*f_offset*t
+        # Residual/baseband frequency offset term 2*pi*f_offset*t
         phase_offset = 2.0 * np.pi * fm_cfg.frequency_offset * t
 
-        # FM message term:
-        # 2*pi*kf * integral(message dt)
+        # FM message term 2*pi*kf * integral(message dt)
         phase_message = 2.0 * np.pi * fm_cfg.frequency_sensitivity * np.cumsum(message) / sample_rate
 
         total_phase = phase_offset + phase_message
@@ -68,9 +61,7 @@ class Modulator:
         constellation_points = self._constellation_instance.generate_constellation_points()
         symbols = self._coding_instance.generate_bits_to_symbols(bits, constellation_points)
 
-        sps = round(symbol_time * sample_rate)
-        if sps <= 0:
-            raise ValueError("symbol_time * sample_rate must be >= 1")
+        sps = symbol_time * sample_rate
 
         upsampled_symbols = np.zeros(symbols.shape[0] * sps, dtype=symbols.dtype)
         upsampled_symbols[::sps] = symbols
