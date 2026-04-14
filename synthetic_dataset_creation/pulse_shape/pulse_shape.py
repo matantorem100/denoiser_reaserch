@@ -5,8 +5,7 @@ import pydantic
 
 class PulseShapeConfig(pydantic.BaseModel):
     pulse_shape_type: Literal["rect"]
-    normalization_type: Literal["None", "norm_2", "cpfsk"]
-
+    normalization_type: str
 class PulseShape:
     def __init__(self, config: PulseShapeConfig):
         self.config = config
