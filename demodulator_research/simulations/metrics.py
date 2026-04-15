@@ -347,20 +347,21 @@ if __name__ == "__main__":
         apply_fm=True,
         frequency_offset=0.0,
         h=0.5,
-        pulse_shape_type="rect",
+        pulse_shape_type="rrc",
         pulse_normalization="cpfsk",
         constellation_type="PAM",
         constellation_order=4,
         noise_type="snr",
-        noise_db_values=list(np.arange(0, 20, 2)),
+        noise_db_values=list(np.arange(-15, 20, 1)),
         n_trials_per_point=3,
         random_seed=1234,
 
         # Put here the methods that exist in your Demodulator class
         demodulation_methods=[
             "differentiate",
-            "coherent",
-            "non_coherent"
+            # "coherent",
+            # "non_coherent",
+            # "coherent_fm_viterbi"
             # "pll",
         ],
 
