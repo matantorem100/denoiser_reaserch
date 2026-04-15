@@ -1,10 +1,8 @@
-from typing import Literal
-
 import numpy as np
 import pydantic
 
 class ConstellationConfig(pydantic.BaseModel):
-    constellation_type: Literal["PAM"]
+    constellation_type: str
     constellation_order: int
 
     @pydantic.field_validator("constellation_order")

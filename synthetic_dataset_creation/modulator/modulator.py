@@ -17,7 +17,6 @@ class FMConfig(pydantic.BaseModel):
 class ModulatorConfig(pydantic.BaseModel):
     pulse_shape_config: PulseShapeConfig
     constellation_config: ConstellationConfig
-    channel_config: ChannelConfig
     fm_config: Optional[FMConfig] = None
 
 
@@ -26,7 +25,6 @@ class Modulator:
         self.config = config
         self._pulse_shape_instance = PulseShape(config.pulse_shape_config)
         self._constellation_instance = Constellation(config.constellation_config)
-        self._channel_instance = Channel(config.channel_config)
         self._coding_instance = Coding(CodingConfig(constellation=config.constellation_config))
 
     def _fm_modulate_baseband(self, message: np.ndarray, sample_rate: float) -> np.ndarray:
@@ -52,9 +50,11 @@ class Modulator:
         signal = np.exp(1j * total_phase)
         return signal
 
-    def modulate(self, bits: np.ndarray, symbol_time: float, sample_rate: float, apply_fm: bool = False) -> np.ndarray:
-        if bits.ndim != 1:
-            raise ValueError("bits must be a 1D numpy array")
+    def modulate(self, bits: np.ndarray, symbol_time: float, sample_rate: float, apply_fm: bool = False,
+                 uw: np.ndarray = None) -> (np.ndarray, np.ndarray):
+
+        if uw is not None:
+            bits = np.concatenate((uw, bits))
 
         constellation_points = self._constellation_instance.generate_constellation_points()
         symbols = self._coding_instance.generate_bits_to_symbols(bits, constellation_points)
@@ -70,8 +70,6 @@ class Modulator:
         if apply_fm:
             modulated_signal =  self._fm_modulate_baseband(modulated_signal, sample_rate)
 
-        transmitted_signal = self._channel_instance.transmit(modulated_signal)
-
-        return transmitted_signal
+        return modulated_signal, bits
 
 
