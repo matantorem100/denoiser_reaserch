@@ -5,7 +5,7 @@ class PulseShapeConfig(pydantic.BaseModel):
     pulse_shape_type: str
     normalization_type: str
     rolloff: float = 0.25
-    span_in_symbols: int = 8
+    span_in_symbols: int = 1
 
 class PulseShape:
     def __init__(self, config: PulseShapeConfig):

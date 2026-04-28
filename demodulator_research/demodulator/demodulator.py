@@ -1,18 +1,14 @@
-from typing import Optional, Literal
-
 import numpy as np
 import pydantic
 
 from synthetic_dataset_creation.coding.coding import Coding, CodingConfig
 from synthetic_dataset_creation.constellation.constellation import Constellation, ConstellationConfig
-from synthetic_dataset_creation.modulator.modulator import FMConfig
 from synthetic_dataset_creation.pulse_shape.pulse_shape import PulseShape, PulseShapeConfig
 
 
 class DemodulatorConfig(pydantic.BaseModel):
     pulse_shape_config: PulseShapeConfig
     constellation_config: ConstellationConfig
-    fm_config: Optional[FMConfig] = None
 
 
 class Demodulator:
@@ -23,25 +19,24 @@ class Demodulator:
         self._coding_instance = Coding(CodingConfig(constellation=config.constellation_config))
 
 
-    def demodulate(self, rx_signal: np.ndarray, symbol_time: float, sample_rate: float, apply_fm: bool = False,
-                   method: str = "differentiate") -> np.ndarray:
-
+    def demodulate(self, rx_signal: np.ndarray, symbol_time: float, sample_rate: float,
+                   method: str = "differentiate", frequency_sensitivity: float = 0.5) -> np.ndarray:
         if method == "differentiate":
-            return self.differentiate_demodulate(rx_signal, symbol_time, sample_rate, apply_fm)
+            return self.differentiate_demodulate(rx_signal, symbol_time, sample_rate, frequency_sensitivity)
         elif method == "coherent":
-            return self.coherent_demodulate(rx_signal, symbol_time, sample_rate, apply_fm)
+            return self.coherent_demodulate(rx_signal, symbol_time, sample_rate, frequency_sensitivity)
         elif method == "non_coherent":
-            return self.non_coherent_demodulate(rx_signal, symbol_time, sample_rate, apply_fm)
+            return self.non_coherent_demodulate(rx_signal, symbol_time, sample_rate, frequency_sensitivity)
         else:
             raise ValueError(f"Unknown demodulation method: {method}")
 
-    def differentiate_demodulate(self, rx_signal: np.ndarray, symbol_time: float, sample_rate: float, apply_fm: bool = False) -> np.ndarray:
+    def differentiate_demodulate(self, rx_signal: np.ndarray, symbol_time: float, sample_rate: float,
+                                 frequency_sensitivity: float = 0.5) -> np.ndarray:
 
         sps = int(symbol_time * sample_rate)
 
-        if apply_fm:
-            rx_signal = (np.diff(np.unwrap(np.angle(rx_signal))) /
-                         (2.0 * np.pi * self.config.fm_config.frequency_sensitivity) * sample_rate)
+        rx_signal = (np.diff(np.unwrap(np.angle(rx_signal))) /
+                     (2.0 * np.pi * frequency_sensitivity) * sample_rate)
 
         constellation_points = self._constellation_instance.generate_constellation_points()
         pulse_shape = self._pulse_shape_instance.generate_pulse_shape(sample_rate, symbol_time)
@@ -60,7 +55,8 @@ class Demodulator:
         bits = self._coding_instance.generate_symbols_to_bits(detected_symbols, constellation_points)
         return bits
 
-    def coherent_demodulate(self, rx_signal: np.ndarray, symbol_time: float, sample_rate: float, apply_fm: bool = False) -> np.ndarray:
+    def coherent_demodulate(self, rx_signal: np.ndarray, symbol_time: float, sample_rate: float,
+                            frequency_sensitivity: float = 0.5) -> np.ndarray:
 
         rx_signal = np.asarray(rx_signal)
         sps = int(symbol_time * sample_rate)
@@ -68,25 +64,7 @@ class Demodulator:
         constellation_points = self._constellation_instance.generate_constellation_points()
         pulse_shape = self._pulse_shape_instance.generate_pulse_shape(sample_rate, symbol_time)
 
-        if not apply_fm:
-            matched_filter = pulse_shape[::-1].conj()
-            mf_energy = np.sum(np.abs(matched_filter) ** 2)
-
-            filtered_signal = np.convolve(rx_signal, matched_filter, mode="full") / mf_energy
-            sampling_offset = len(pulse_shape) - 1
-            detected_symbols = filtered_signal[sampling_offset::sps]
-
-            n_expected_symbols = int(np.ceil((len(rx_signal) - len(pulse_shape) + 1) / sps))
-            n_expected_symbols = max(n_expected_symbols, 0)
-            detected_symbols = detected_symbols[:n_expected_symbols]
-
-            bits = self._coding_instance.generate_symbols_to_bits(detected_symbols, constellation_points)
-            return bits
-
-        if self.config.fm_config is None:
-            raise ValueError("FM config must be provided when apply_fm=True")
-
-        h = self.config.fm_config.frequency_sensitivity
+        h = frequency_sensitivity
         dt = 1.0 / sample_rate
 
         n_symbols_in_signal = int(np.floor((len(rx_signal) - len(pulse_shape) + 1) / sps))
@@ -150,14 +128,14 @@ class Demodulator:
         return int(np.argmin(np.abs(circular_error)))
 
     def coherent_fm_viterbi_demodulate(self, rx_signal: np.ndarray, symbol_time: float, sample_rate: float,
-                                       apply_fm: bool = False, n_phase_states: int = 8) -> np.ndarray:
+                                       n_phase_states: int = 8, frequency_sensitivity: float = 0.5) -> np.ndarray:
         """
         True Viterbi detector for full-response FM/CPFSK-like signal.
 
         State = quantized phase at symbol boundary.
         Branch metric = normalized correlation with the candidate waveform.
         """
-        h = self.config.fm_config.frequency_sensitivity
+        h = frequency_sensitivity
         dt = 1.0 / sample_rate
         sps = int(symbol_time * sample_rate)
 
@@ -265,7 +243,7 @@ class Demodulator:
         rx_signal: np.ndarray,
         symbol_time: float,
         sample_rate: float,
-        apply_fm: bool = False
+        frequency_sensitivity: float = 0.5
     ) -> np.ndarray:
         """
         Non-coherent detector:
@@ -279,41 +257,7 @@ class Demodulator:
         constellation_points = self._constellation_instance.generate_constellation_points()
         pulse_shape = self._pulse_shape_instance.generate_pulse_shape(sample_rate, symbol_time)
 
-        if not apply_fm:
-            # For real linear PAM this is not the usual preferred detector,
-            # but this gives a non-coherent-style comparison based on magnitude.
-            matched_filter = pulse_shape[::-1].conj()
-            mf_energy = np.sum(np.abs(matched_filter) ** 2)
-
-            filtered_signal = np.convolve(rx_signal, matched_filter, mode="full") / mf_energy
-            sampling_offset = len(pulse_shape) - 1
-            detected_symbols = filtered_signal[sampling_offset::sps]
-
-            n_expected_symbols = int(np.ceil((len(rx_signal) - len(pulse_shape) + 1) / sps))
-            n_expected_symbols = max(n_expected_symbols, 0)
-            detected_symbols = detected_symbols[:n_expected_symbols]
-
-            # Magnitude-only decision:
-            # compare |detected_symbols| to |constellation_points|, then restore sign from sample.
-            abs_constellation = np.abs(constellation_points)
-            detected_abs = np.abs(detected_symbols)
-
-            detected_indices = np.argmin(
-                np.abs(detected_abs[:, None] - abs_constellation[None, :]),
-                axis=1
-            )
-            estimated_symbols = constellation_points[detected_indices]
-
-            # crude sign restoration for real PAM
-            estimated_symbols = np.sign(np.real(detected_symbols)) * np.abs(estimated_symbols)
-
-            bits = self._coding_instance.generate_symbols_to_bits(estimated_symbols, constellation_points)
-            return bits
-
-        if self.config.fm_config is None:
-            raise ValueError("FM config must be provided when apply_fm=True")
-
-        h = self.config.fm_config.frequency_sensitivity
+        h = frequency_sensitivity
         dt = 1.0 / sample_rate
 
         n_expected_symbols = int(np.floor((len(rx_signal) - len(pulse_shape) + 1) / sps))
