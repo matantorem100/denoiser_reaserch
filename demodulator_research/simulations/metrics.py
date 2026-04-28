@@ -131,7 +131,6 @@ class CommunicationEvaluator:
                     rx_signal=rx_signal,
                     symbol_time=self.config.symbol_time,
                     sample_rate=self.config.sample_rate,
-                    apply_fm=self.config.apply_fm
                 )
 
         raise AttributeError(
@@ -347,12 +346,12 @@ if __name__ == "__main__":
         apply_fm=True,
         frequency_offset=0.0,
         h=0.5,
-        pulse_shape_type="rrc",
+        pulse_shape_type="rect",
         pulse_normalization="cpfsk",
         constellation_type="PAM",
         constellation_order=4,
         noise_type="snr",
-        noise_db_values=list(np.arange(-15, 20, 1)),
+        noise_db_values=list(np.arange(0, 20, 2)),
         n_trials_per_point=3,
         random_seed=1234,
 
@@ -360,8 +359,8 @@ if __name__ == "__main__":
         demodulation_methods=[
             "differentiate",
             # "coherent",
-            # "non_coherent",
             # "coherent_fm_viterbi"
+            # "coherent_cpm_viterbi"
             # "pll",
         ],
 
