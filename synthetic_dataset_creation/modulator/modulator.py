@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 import pydantic
@@ -51,7 +51,7 @@ class Modulator:
         return signal
 
     def modulate(self, bits: np.ndarray, symbol_time: float, sample_rate: float, apply_fm: bool = False,
-                 uw: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray]:
+                 uw: np.ndarray = None) -> (np.ndarray, np.ndarray):
 
         if uw is not None:
             bits = np.concatenate((uw, bits))

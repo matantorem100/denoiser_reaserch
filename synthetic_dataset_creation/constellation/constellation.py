@@ -27,7 +27,7 @@ class Constellation:
 
     def generate_pam_constellation(self):
         constellation_points = 2 * (np.arange(self.config.constellation_order) + 1) - 1 - self.config.constellation_order
-        return constellation_points.astype(np.float32)
+        return constellation_points
 
 
 
