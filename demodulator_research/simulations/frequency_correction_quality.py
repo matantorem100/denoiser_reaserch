@@ -1,153 +1,36 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import Dict, Any, Callable
+from typing import Dict, Any
 
 from demodulator_research.frequency_offset_estimation.frequency_offset_estimation import (
     FrequencyOffsetEstimator,
 )
 
 from synthetic_dataset_creation.dataset_creation import DatasetConfig, Dataset
-
-
-def normalize_to_unit_magnitude(signal: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-    """
-    Normalize a complex signal to unit magnitude.
-
-    This is useful for differential phase estimation because we care mostly
-    about phase rotation, not amplitude variations.
-    """
-    signal = np.asarray(signal, dtype=np.complex128).reshape(-1)
-    return signal / np.maximum(np.abs(signal), eps)
-
-
-def estimate_frequency_offset_diff_blind_circular_mean_hz(
-    rx_signal: np.ndarray,
-    sample_rate: float,
-    normalize_amplitude: bool = True,
-) -> float:
-    """
-    Blind differential frequency offset estimator using circular mean.
-
-    Computes:
-
-        d[n] = rx[n] * conj(rx[n-1])
-
-    Then estimates the average phase increment using:
-
-        angle(mean(d[n]))
-
-    Finally converts phase increment per sample to Hz:
-
-        f_hat = angle(mean(d)) * Fs / (2*pi)
-
-    This is a circular/statistical mean of the differential phasors.
-    """
-
-    rx = np.asarray(rx_signal, dtype=np.complex128).reshape(-1)
-
-    if len(rx) < 2:
-        return 0.0
-
-    if normalize_amplitude:
-        rx = normalize_to_unit_magnitude(rx)
-
-    differential_rx = rx[1:] * np.conj(rx[:-1])
-
-    mean_differential_phasor = np.mean(differential_rx)
-
-    phase_increment_rad = np.angle(mean_differential_phasor)
-
-    estimated_offset_hz = phase_increment_rad * sample_rate / (2.0 * np.pi)
-
-    return float(estimated_offset_hz)
-
-
-def estimate_frequency_offset_diff_blind_linear_mean_hz(
-    rx_signal: np.ndarray,
-    sample_rate: float,
-    normalize_amplitude: bool = True,
-) -> float:
-    """
-    Blind differential frequency offset estimator using linear mean.
-
-    Computes:
-
-        d[n] = rx[n] * conj(rx[n-1])
-
-    Then estimates phase increments using:
-
-        phase_increment[n] = angle(d[n])
-
-    Then averages the phase increments directly:
-
-        mean_phase_increment = mean(angle(d[n]))
-
-    Finally converts to Hz:
-
-        f_hat = mean_phase_increment * Fs / (2*pi)
-
-    For CPFSK, this estimator is often very intuitive because angle(d[n])
-    is basically the instantaneous frequency in radians/sample.
-    """
-
-    rx = np.asarray(rx_signal, dtype=np.complex128).reshape(-1)
-
-    if len(rx) < 2:
-        return 0.0
-
-    if normalize_amplitude:
-        rx = normalize_to_unit_magnitude(rx)
-
-    differential_rx = rx[1:] * np.conj(rx[:-1])
-
-    phase_increments_rad = np.angle(differential_rx)
-
-    mean_phase_increment_rad = np.mean(phase_increments_rad)
-
-    estimated_offset_hz = mean_phase_increment_rad * sample_rate / (2.0 * np.pi)
-
-    return float(estimated_offset_hz)
+from synthetic_dataset_creation.constellation.constellation import ConstellationConfig
+from synthetic_dataset_creation.modulator.modulator import ModulatorConfig, Modulator
+from synthetic_dataset_creation.pulse_shape.pulse_shape import PulseShapeConfig
 
 
 def build_frequency_estimation_methods(
-    estimator: FrequencyOffsetEstimator,
-    sample_rate: float,
-) -> Dict[str, Callable[[np.ndarray], float]]:
+    reference_signal: np.ndarray | None = None,
+) -> Dict[str, FrequencyOffsetEstimator]:
     """
     Register the frequency-estimation methods you want to compare.
 
-    All methods receive only rx_signal.
-
-    Methods:
-        coarse:
-            Your existing estimator.coarse_estimate_hz method.
-
-        diff_blind_circular_mean:
-            Blind differential estimator based on angle(mean(d[n])).
-
-        diff_blind_linear_mean:
-            Blind differential estimator based on mean(angle(d[n])).
+    Method names must match FrequencyOffsetEstimator.method_type.
     """
 
-    methods: Dict[str, Callable[[np.ndarray], float]] = {}
+    methods = {
+        "phase_diff_coarse": FrequencyOffsetEstimator(method_type="phase_diff_coarse"),
+        "differential_circular_coarse": FrequencyOffsetEstimator(method_type="differential_circular_coarse"),
+    }
 
-    methods["coarse"] = estimator.coarse_estimate_hz
-
-    methods["diff_blind_circular_mean"] = lambda rx_signal: (
-        estimate_frequency_offset_diff_blind_circular_mean_hz(
-            rx_signal=rx_signal,
-            sample_rate=sample_rate,
-            normalize_amplitude=True,
+    if reference_signal is not None:
+        methods["differential_data_aided"] = FrequencyOffsetEstimator(
+            method_type="differential_data_aided",
+            reference_signal=reference_signal,
         )
-    )
-
-    methods["diff_blind_linear_mean"] = lambda rx_signal: (
-        estimate_frequency_offset_diff_blind_linear_mean_hz(
-            rx_signal=rx_signal,
-            sample_rate=sample_rate,
-            normalize_amplitude=True,
-        )
-    )
 
     return methods
 
@@ -155,6 +38,7 @@ def build_frequency_estimation_methods(
 def evaluate_remaining_frequency_offset_vs_snr(
     dataset: Dict[float, Dict[int, Dict[str, Any]]],
     sample_rate: float,
+    reference_signal: np.ndarray | None = None,
 ) -> Dict[str, Dict[str, np.ndarray]]:
     """
     Compares frequency-correction methods by measuring:
@@ -170,12 +54,7 @@ def evaluate_remaining_frequency_offset_vs_snr(
         - mean true offset
     """
 
-    estimator = FrequencyOffsetEstimator(sample_rate=sample_rate)
-
-    methods = build_frequency_estimation_methods(
-        estimator=estimator,
-        sample_rate=sample_rate,
-    )
+    methods = build_frequency_estimation_methods(reference_signal=reference_signal)
 
     snr_values = np.asarray(sorted(dataset.keys()), dtype=float)
 
@@ -205,14 +84,14 @@ def evaluate_remaining_frequency_offset_vs_snr(
 
             true_offsets.append(true_offset_hz)
 
-            for method_name, method_fn in methods.items():
-                estimated_offset_hz = float(method_fn(rx_signal))
+            for method_name, estimator in methods.items():
+                estimated_offset_hz = float(estimator.estimate(rx_signal, sample_rate))
 
-                # The correction itself would be:
-                # corrected_signal = estimator.correct_frequency_offset(
-                #     signal=rx_signal,
-                #     frequency_offset_hz=estimated_offset_hz,
-                # )
+                _corrected_signal = estimator.correct_frequency_offset(
+                    signal=rx_signal,
+                    frequency_offset_hz=estimated_offset_hz,
+                    sample_rate=sample_rate,
+                )
 
                 # But since this is simulation, the residual is known analytically:
                 residual_hz = true_offset_hz - estimated_offset_hz
@@ -423,9 +302,34 @@ if __name__ == "__main__":
     dataset_generator = Dataset(dataset_cfg)
     dataset = dataset_generator.generate_dataset()
 
+    pulse_shape_config = PulseShapeConfig(
+        pulse_shape_type=dataset_cfg.pulse_shape_type,
+        normalization_type=dataset_cfg.pulse_normalization,
+        span_in_symbols=dataset_cfg.span_in_symbols,
+    )
+    constellation_config = ConstellationConfig(
+        constellation_type=dataset_cfg.constellation_type,
+        constellation_order=dataset_cfg.constellation_order,
+    )
+    modulator = Modulator(
+        ModulatorConfig(
+            pulse_shape_config=pulse_shape_config,
+            constellation_config=constellation_config,
+        )
+    )
+    reference_uw_signal, _ = modulator.modulate(
+        bits=np.array([], dtype=np.uint8),
+        symbol_time=dataset_cfg.symbol_time,
+        sample_rate=dataset_cfg.sample_rate,
+        uw=np.asarray(uw_bits, dtype=np.uint8),
+        frequency_offset=0.0,
+        frequency_sensitivity=dataset_cfg.h,
+    )
+
     results = evaluate_remaining_frequency_offset_vs_snr(
         dataset=dataset,
         sample_rate=dataset_cfg.sample_rate,
+        reference_signal=reference_uw_signal,
     )
 
     plot_remaining_frequency_offset_results(
