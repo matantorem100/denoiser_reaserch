@@ -23,8 +23,8 @@ class Demodulator:
                    method: str = "differentiate", frequency_sensitivity: float = 0.5) -> np.ndarray:
         if method == "differentiate":
             return self.differentiate_demodulate(rx_signal, symbol_time, sample_rate, frequency_sensitivity)
-        elif method == "coherent":
-            return self.coherent_demodulate(rx_signal, symbol_time, sample_rate, frequency_sensitivity)
+        elif method == "semi_coherent":
+            return self.semi_coherent_demodulate(rx_signal, symbol_time, sample_rate, frequency_sensitivity)
         elif method == "non_coherent":
             return self.non_coherent_demodulate(rx_signal, symbol_time, sample_rate, frequency_sensitivity)
         else:
@@ -55,60 +55,222 @@ class Demodulator:
         bits = self._coding_instance.generate_symbols_to_bits(detected_symbols, constellation_points)
         return bits
 
-    def coherent_demodulate(self, rx_signal: np.ndarray, symbol_time: float, sample_rate: float,
-                            frequency_sensitivity: float = 0.5) -> np.ndarray:
 
-        rx_signal = np.asarray(rx_signal)
-        sps = int(symbol_time * sample_rate)
+    def semi_coherent_demodulate(
+            self,
+            rx_signal: np.ndarray,
+            symbol_time: float,
+            sample_rate: float,
+            frequency_sensitivity: float = 0.5,
+            memory_depth_symbols: int | None = None,
+            alpha: float = 0.15,
+            beta: float = 0.01,
+            use_abs_metric: bool = False,
+    ) -> np.ndarray:
+        """
+        Semi-coherent CPFSK/FM detector with decision-directed phase/frequency tracking
+        and finite pulse-memory support.
+
+        This is NOT Viterbi / MLSE.
+
+        It tests only the current candidate symbol, but builds the reference waveform
+        using:
+            current candidate symbol
+            + previous already-decided symbols that still affect the current segment.
+
+        Assumes the TX pulse behaves like a causal frequency pulse:
+            shaped_frequency[n] = sum_k a[k] * pulse[n - k*sps]
+
+        Parameters
+        ----------
+        rx_signal:
+            Complex received CPFSK/FM signal.
+
+        symbol_time:
+            Symbol duration in seconds.
+
+        sample_rate:
+            Sample rate in Hz.
+
+        frequency_sensitivity:
+            CPFSK/FM sensitivity h.
+
+        memory_depth_symbols:
+            Number of previous decided symbols to include.
+            If None, inferred from pulse length.
+
+            Example:
+                rect pulse length = sps -> memory depth = 0
+                pulse length = 8*sps -> memory depth = 7 or 8 depending convention
+
+        alpha:
+            Phase tracking gain.
+
+        beta:
+            Frequency tracking gain.
+
+        use_abs_metric:
+            If True, uses abs(correlation) as metric.
+            If False, uses real(correlation), more coherent but more phase-sensitive.
+        """
+
+        rx_signal = np.asarray(rx_signal, dtype=np.complex128).reshape(-1)
+
+        sps = int(round(symbol_time * sample_rate))
+        if sps <= 0:
+            raise ValueError("samples per symbol must be positive")
 
         constellation_points = self._constellation_instance.generate_constellation_points()
+        constellation_points = np.asarray(constellation_points)
+
         pulse_shape = self._pulse_shape_instance.generate_pulse_shape(sample_rate, symbol_time)
+        pulse_shape = np.asarray(pulse_shape, dtype=np.float64).reshape(-1)
 
         h = frequency_sensitivity
         dt = 1.0 / sample_rate
 
-        n_symbols_in_signal = int(np.floor((len(rx_signal) - len(pulse_shape) + 1) / sps))
+        # ------------------------------------------------------------
+        # Split pulse into symbol-spaced chunks.
+        #
+        # chunk[0] affects the segment of the symbol currently being tested.
+        # chunk[1] is the tail from the previous symbol.
+        # chunk[2] is the tail from two symbols ago.
+        # etc.
+        # ------------------------------------------------------------
+        n_chunks = int(np.ceil(len(pulse_shape) / sps))
+
+        pulse_chunks = []
+        for i in range(n_chunks):
+            start = i * sps
+            stop = start + sps
+
+            chunk = pulse_shape[start:stop]
+
+            # Pad last chunk to exactly one symbol.
+            if len(chunk) < sps:
+                chunk = np.pad(chunk, (0, sps - len(chunk)))
+
+            pulse_chunks.append(chunk)
+
+        pulse_chunks = np.asarray(pulse_chunks)  # shape: (n_chunks, sps)
+
+        if memory_depth_symbols is None:
+            # Number of previous symbols that can affect the current segment.
+            # chunk[0] is current symbol, so previous-symbol memory is n_chunks - 1.
+            memory_depth_symbols = n_chunks - 1
+
+        memory_depth_symbols = int(memory_depth_symbols)
+        if memory_depth_symbols < 0:
+            raise ValueError("memory_depth_symbols must be non-negative")
+
+        # We cannot use more previous-symbol chunks than the pulse actually has.
+        memory_depth_symbols = min(memory_depth_symbols, n_chunks - 1)
+
+        n_symbols = len(rx_signal) // sps
 
         decided_symbols = []
+
+        # CPFSK phase state at the beginning of the current symbol.
         phase_state = 0.0
 
-        for current_symbol in range(n_symbols_in_signal):
-            start_index_of_current_symbol = current_symbol * sps
-            end_index_of_current_symbol = start_index_of_current_symbol + sps
+        # Residual carrier frequency estimate in Hz.
+        freq_state_hz = 0.0
 
-            if end_index_of_current_symbol > len(rx_signal):
+        for k in range(n_symbols):
+            seg_start = k * sps
+            seg_stop = seg_start + sps
+
+            r_seg = rx_signal[seg_start:seg_stop]
+            if len(r_seg) != sps:
                 break
 
-            # extract the relevant signal (corresponding to the current symbol)
-            r_seg = rx_signal[start_index_of_current_symbol: end_index_of_current_symbol]
+            r_norm = np.linalg.norm(r_seg)
 
             best_metric = -np.inf
             best_symbol = constellation_points[0]
+            best_ref = None
+            best_m_seg = None
 
-            for candidate_constellation_point in constellation_points:
-                m = candidate_constellation_point * pulse_shape
-                phi = phase_state + 2.0 * np.pi * h * np.cumsum(m) * dt
-                modulated_candidate = np.exp(1j * phi)
+            # ------------------------------------------------------------
+            # Try each current-symbol candidate.
+            # Previous symbols are fixed using decision-directed decisions.
+            # ------------------------------------------------------------
+            for a_candidate in constellation_points:
 
-                denom = np.linalg.norm(r_seg) * np.linalg.norm(modulated_candidate)
+                # Current frequency segment m[n] for this one-symbol interval.
+                m_seg = np.zeros(sps, dtype=np.float64)
+
+                # Current candidate contribution.
+                m_seg += np.real(a_candidate) * pulse_chunks[0]
+
+                # Previous decided-symbol tail contributions.
+                #
+                # d = 1 means previous symbol a[k-1] with pulse_chunks[1]
+                # d = 2 means a[k-2] with pulse_chunks[2]
+                # etc.
+                max_d = min(memory_depth_symbols, len(decided_symbols), n_chunks - 1)
+
+                for d in range(1, max_d + 1):
+                    previous_symbol = decided_symbols[-d]
+                    m_seg += np.real(previous_symbol) * pulse_chunks[d]
+
+                # CPFSK phase contribution over the current segment.
+                symbol_phase = 2.0 * np.pi * h * np.cumsum(m_seg) * dt
+
+                # Residual CFO contribution over current segment.
+                n = np.arange(sps)
+                freq_phase = 2.0 * np.pi * freq_state_hz * n / sample_rate
+
+                phi = phase_state + symbol_phase + freq_phase
+                s_ref = np.exp(1j * phi)
+
+                denom = r_norm * np.linalg.norm(s_ref)
 
                 if denom < 1e-12:
                     metric = -np.inf
                 else:
-                    metric = np.real(np.vdot(modulated_candidate, r_seg)) / denom
+                    corr = np.vdot(s_ref, r_seg)
+
+                    if use_abs_metric:
+                        metric = np.abs(corr) / denom
+                    else:
+                        metric = np.real(corr) / denom
 
                 if metric > best_metric:
                     best_metric = metric
-                    best_symbol = candidate_constellation_point
+                    best_symbol = a_candidate
+                    best_ref = s_ref
+                    best_m_seg = m_seg
 
             decided_symbols.append(best_symbol)
 
-            m_best = best_symbol * pulse_shape
-            phase_state = phase_state + 2.0 * np.pi * h * np.sum(m_best) * dt
+            # ------------------------------------------------------------
+            # PLL / residual CFO update from the chosen branch.
+            # ------------------------------------------------------------
+            corr = np.vdot(best_ref, r_seg)
+            phase_error = np.angle(corr)
+
+            # Frequency update in Hz.
+            freq_state_hz += beta * phase_error / (2.0 * np.pi * symbol_time)
+
+            # Phase-state update:
+            # integrate the actual selected m_seg over this symbol.
+            selected_phase_increment = 2.0 * np.pi * h * np.sum(best_m_seg) * dt
+
+            phase_state += selected_phase_increment
+            phase_state += 2.0 * np.pi * freq_state_hz * symbol_time
+            phase_state += alpha * phase_error
+
+            # Keep phase bounded.
             phase_state = np.angle(np.exp(1j * phase_state))
 
         decided_symbols = np.asarray(decided_symbols, dtype=constellation_points.dtype)
-        bits = self._coding_instance.generate_symbols_to_bits(decided_symbols, constellation_points)
+
+        bits = self._coding_instance.generate_symbols_to_bits(
+            decided_symbols,
+            constellation_points,
+        )
+
         return bits
 
 
@@ -192,6 +354,8 @@ class Demodulator:
                     if denom < 1e-12:
                         branch_metric = -np.inf
                     else:
+                        if len(modulated_candidate) % 2 == 1:
+                            r_seg = rx_signal[start_index:end_index + 1]
                         branch_metric = np.real(np.vdot(modulated_candidate, r_seg)) / denom
 
                     # End-of-symbol phase

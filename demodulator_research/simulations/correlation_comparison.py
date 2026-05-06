@@ -136,6 +136,10 @@ class UwCorrelationEvaluator:
 
         norm_corr = corr / denom
 
+        # import matplotlib.pyplot as plt
+        # plt.plot(np.abs(norm_corr))
+        # plt.show()
+
         if use_abs:
             metric_corr = np.abs(norm_corr)
         else:
@@ -308,7 +312,7 @@ if __name__ == "__main__":
     dataset_cfg = DatasetConfig(
         sample_rate=10_000,
         symbol_time=1e-3,
-        n_bits_to_transmit=100_000,
+        n_bits_to_transmit=10000,
 
         min_frequency_offset=-0,
         max_frequency_offset=0,
@@ -325,7 +329,7 @@ if __name__ == "__main__":
 
         n_signals_per_snr=3,
 
-        uw_bits=[1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0],
+        uw_bits = [1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0]
     )
 
     dataset_generator = Dataset(dataset_cfg)
@@ -346,7 +350,7 @@ if __name__ == "__main__":
 
         demodulation_methods=[
             "differentiate",
-            "coherent",
+            # "coherent",
             # "non_coherent",
             # "pll",
         ],

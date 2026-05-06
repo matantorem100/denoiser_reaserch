@@ -18,6 +18,9 @@ class PulseShape:
         elif self.config.pulse_shape_type == "rrc":
             rrc_pulse = self._generate_rrc_pulse(sample_rate, symbol_time)
             return rrc_pulse
+        elif self.config.pulse_shape_type == "rc":
+            rc_pulse = self._generate_raised_cosine_frequency_pulse(sample_rate, symbol_time)
+            return rc_pulse
         else:
             raise ValueError(f"Unknown pulse shape type: {self.config.pulse_shape_type}")
 

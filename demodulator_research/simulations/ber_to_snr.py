@@ -4,6 +4,7 @@ import pydantic
 from typing import Dict, List, Optional, Any
 
 from demodulator_research.demodulator.demodulator import DemodulatorConfig, Demodulator
+from demodulator_research.frequency_offset_estimation.frequency_offset_estimation import FrequencyOffsetEstimator
 from synthetic_dataset_creation.constellation.constellation import ConstellationConfig
 from synthetic_dataset_creation.dataset_creation import DatasetConfig, Dataset
 from synthetic_dataset_creation.pulse_shape.pulse_shape import PulseShapeConfig
@@ -28,6 +29,9 @@ class BerEvaluatorConfig(pydantic.BaseModel):
 class BerEvaluator:
     def __init__(self, config: BerEvaluatorConfig):
         self.config = config
+
+        self.bits_per_symbol = int(np.log2(self.config.constellation_order))
+        self.sps = int(round(self.config.sample_rate * self.config.symbol_time))
 
         pulse_shape_config = PulseShapeConfig(pulse_shape_type=self.config.pulse_shape_type,
                                               normalization_type=self.config.pulse_normalization,
@@ -96,8 +100,11 @@ class BerEvaluator:
                 rx_signal = sample["rx_signal"]
 
                 for method in self.config.demodulation_methods:
+                    estimated_frequency_offset = FrequencyOffsetEstimator(self.config.sample_rate).estimate(rx_signal)
+                    real_offset = dataset[noise_db][signal_idx]["frequency_offset"]
+                    print(f"estimated frequency offset: {estimated_frequency_offset}, the real frequency offset: {real_offset}")
+                    corrected_rx = FrequencyOffsetEstimator(self.config.sample_rate).correct_frequency_offset(rx_signal, estimated_frequency_offset)
                     rx_bits = self._call_demodulator(method_name=method, rx_signal=rx_signal)
-
                     ber = self._calculate_ber(tx_bits=tx_bits, rx_bits=rx_bits)
 
                     ber_trials_per_method[method].append(ber)
@@ -137,26 +144,26 @@ class BerEvaluator:
 if __name__ == "__main__":
 
     dataset_cfg = DatasetConfig(
-        sample_rate=10_000,
+        sample_rate=10_0000,
         symbol_time=1e-3,
-        n_bits_to_transmit=100_000,
+        n_bits_to_transmit=100000,
 
-        min_frequency_offset=0,
+        min_frequency_offset=-0,
         max_frequency_offset=0,
 
-        pulse_shape_type="rect",
-        span_in_symbols=1,
+        pulse_shape_type="rrc",
+        span_in_symbols=10,
         pulse_normalization="cpfsk",
 
         constellation_type="PAM",
         constellation_order=4,
 
         noise_type="snr",
-        noise_db_values=list(np.arange(-10, 20, 2)),
+        noise_db_values=list(np.arange(0, 20, 2)),
 
         n_signals_per_snr=3,
 
-        uw_bits=[1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0],
+        uw_bits=[1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0],
     )
 
     dataset_generator = Dataset(dataset_cfg)
@@ -176,11 +183,10 @@ if __name__ == "__main__":
         noise_type=dataset_cfg.noise_type,
 
         demodulation_methods=[
-            "differentiate",
-            "coherent",
-            # "non_coherent",
-            # "pll",
-        ],
+                              "differentiate",
+                              # "semi_coherent",
+                              # "coherent_fm_viterbi"
+                              ],
     )
 
     evaluator = BerEvaluator(evaluator_cfg)

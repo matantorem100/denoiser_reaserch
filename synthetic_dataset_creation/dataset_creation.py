@@ -16,6 +16,7 @@ class DatasetConfig(pydantic.BaseModel):
 
     min_frequency_offset: float = -100
     max_frequency_offset: float = 100
+    const_frequency_offset: Optional[float] = None
     h: float = 0.5
 
     pulse_shape_type: str = "rect"
@@ -123,7 +124,10 @@ class Dataset:
             dataset[noise_db] = {}
 
             for signal_idx in range(self.config.n_signals_per_snr):
-                frequency_offset = np.random.uniform(self.config.min_frequency_offset, self.config.max_frequency_offset)
+                if self.config.const_frequency_offset is not None:
+                    frequency_offset = self.config.const_frequency_offset
+                else:
+                    frequency_offset = np.random.uniform(self.config.min_frequency_offset, self.config.max_frequency_offset)
 
                 sample = self.generate_one_signal(noise_db=noise_db, frequency_offset=frequency_offset, uw=self.uw_bits)
 

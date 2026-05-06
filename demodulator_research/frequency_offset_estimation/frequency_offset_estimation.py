@@ -8,11 +8,7 @@ class FrequencyOffsetEstimator:
 
 
     @staticmethod
-    def calculate_normalized_correlation(signal: np.ndarray, uw: np.ndarray, is_bits = False) -> np.ndarray:
-        if is_bits:
-            signal = 2 * signal - 1
-            uw = 2 * uw - 1
-
+    def calculate_normalized_correlation(signal: np.ndarray, uw: np.ndarray) -> np.ndarray:
         corr = sp.convolve(signal, np.conj(uw[::-1]), mode="full")
 
         uw_energy = np.linalg.norm(uw, ord=2)
@@ -25,7 +21,16 @@ class FrequencyOffsetEstimator:
 
         return norm_corr
 
-    def coarse_estimate_hz(self, signal: np.ndarray, uw: np.ndarray) -> float:
+    def coarse_estimate_hz(self, signal: np.ndarray) -> float:
+        phase_diff = np.diff(np.unwrap(np.angle(signal)))
+
+        mean_rad_per_sample = np.mean(phase_diff)
+
+        coarse_hz = mean_rad_per_sample * self.sample_rate / (2 * np.pi)
+
+        return float(coarse_hz)
+
+    def fine_estimate_hz(self, signal: np.ndarray) -> float:
         phase_diff = np.diff(np.unwrap(np.angle(signal)))
 
         mean_rad_per_sample = np.mean(phase_diff)
@@ -50,6 +55,6 @@ class FrequencyOffsetEstimator:
         correction = np.exp(-1j * 2 * np.pi * frequency_offset_hz * n / self.sample_rate)
         return signal * correction
 
-    def estimate(self, signal: np.ndarray, uw: np.ndarray) -> float:
-        coarse_hz = self.coarse_estimate_hz(signal, uw)
+    def estimate(self, signal: np.ndarray) -> float:
+        coarse_hz = self.coarse_estimate_hz(signal)
         return float(coarse_hz)
