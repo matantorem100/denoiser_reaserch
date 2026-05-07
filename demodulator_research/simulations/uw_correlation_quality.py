@@ -1,330 +1,180 @@
-import numpy as np
+from dataclasses import dataclass
+from typing import Dict, Any
+
 import matplotlib.pyplot as plt
+import numpy as np
 
+from demodulator_research.uw_detection.uw_detection import UwDetector
 from synthetic_dataset_creation.constellation.constellation import ConstellationConfig
-from synthetic_dataset_creation.pulse_shape.pulse_shape import PulseShapeConfig
-from synthetic_dataset_creation.modulator.modulator import ModulatorConfig, Modulator
+from synthetic_dataset_creation.modulator.modulator import Modulator, ModulatorConfig
+from synthetic_dataset_creation.pulse_shape.pulse_shape import PulseShapeConfig, PulseShape
+from synthetic_dataset_creation.coding.coding import Coding, CodingConfig
 
 
-# =============================================================================
-# Basic helpers
-# =============================================================================
+@dataclass
+class UwCorrelationQualityConfig:
+    sample_rate: float = 10_000
+    symbol_time: float = 1e-3
+    frequency_sensitivity: float = 0.5
 
-def add_awgn_by_snr(signal: np.ndarray, snr_db: float, rng: np.random.Generator) -> np.ndarray:
+    pulse_shape_type: str = "rect"
+    span_in_symbols: int = 1
+    pulse_normalization: str = "cpfsk"
+
+    constellation_type: str = "PAM"
+    constellation_order: int = 4
+
+    n_payload_bits: int = 4000
+    leading_noise_samples: int = 300
+    n_trials_per_snr: int = 20
+    random_seed: int = 0
+
+    snr_db_values: tuple[float | None, ...] = (None, 20.0, 10.0, 5.0, 0.0)
+    frequency_offsets_hz: tuple[float, ...] = (0.0, 200.0)
+
+    uw_bits: tuple[int, ...] = (
+        1, 0, 0, 1, 0, 1, 1, 0, 0, 0,
+        0, 0, 1, 1, 1, 0, 1, 1, 1, 0,
+    )
+
+    plot_correlations: bool = True
+    max_lags_to_plot: int = 900
+
+
+def add_awgn_by_snr(
+        signal: np.ndarray,
+        snr_db: float,
+        rng: np.random.Generator,
+) -> np.ndarray:
     signal = np.asarray(signal, dtype=np.complex128)
-
     signal_power = np.mean(np.abs(signal) ** 2)
     snr_linear = 10.0 ** (snr_db / 10.0)
     noise_power = signal_power / snr_linear
 
     noise = np.sqrt(noise_power / 2.0) * (
-        rng.standard_normal(signal.shape) + 1j * rng.standard_normal(signal.shape)
+            rng.standard_normal(signal.shape) + 1j * rng.standard_normal(signal.shape)
     )
 
     return signal + noise
 
 
 def apply_frequency_offset(
-    signal: np.ndarray,
-    frequency_offset_hz: float,
-    sample_rate: float,
+        signal: np.ndarray,
+        frequency_offset_hz: float,
+        sample_rate: float,
 ) -> np.ndarray:
-    signal = np.asarray(signal, dtype=np.complex128)
+    signal = np.asarray(signal, dtype=np.complex128).reshape(-1)
     n = np.arange(len(signal))
-
     return signal * np.exp(1j * 2.0 * np.pi * frequency_offset_hz * n / sample_rate)
 
 
-def normalized_sliding_complex_correlation(
-    signal: np.ndarray,
-    reference: np.ndarray,
-    use_abs: bool = True,
-    eps: float = 1e-12,
-) -> np.ndarray:
-    """
-    Sliding normalized correlation:
-
-        corr[k] = <reference, signal[k:k+L]> / (||reference|| ||segment||)
-
-    If use_abs=True, returns abs(corr[k]).
-    If use_abs=False, returns real(corr[k]).
-
-    For detection, abs is usually better.
-    """
-
-    signal = np.asarray(signal, dtype=np.complex128).reshape(-1)
-    reference = np.asarray(reference, dtype=np.complex128).reshape(-1)
-
-    L = len(reference)
-    n_lags = len(signal) - L + 1
-
-    if n_lags <= 0:
-        raise ValueError("Signal must be longer than or equal to reference.")
-
-    reference_norm = np.linalg.norm(reference)
-    out = np.zeros(n_lags, dtype=np.float64)
-
-    for k in range(n_lags):
-        segment = signal[k:k + L]
-        denom = reference_norm * np.linalg.norm(segment)
-
-        if denom < eps:
-            out[k] = 0.0
-            continue
-
-        c = np.vdot(reference, segment) / denom
-
-        if use_abs:
-            out[k] = np.abs(c)
-        else:
-            out[k] = np.real(c)
-
-    return out
-
-
-def normalized_sliding_real_correlation(
-    signal: np.ndarray,
-    reference: np.ndarray,
-    use_abs: bool = True,
-    eps: float = 1e-12,
-) -> np.ndarray:
-    """
-    Same as normalized complex correlation, but for real-valued sequences.
-
-    Useful for:
-
-        diff(unwrap(angle(signal)))
-    """
-
-    signal = np.asarray(signal, dtype=np.float64).reshape(-1)
-    reference = np.asarray(reference, dtype=np.float64).reshape(-1)
-
-    L = len(reference)
-    n_lags = len(signal) - L + 1
-
-    if n_lags <= 0:
-        raise ValueError("Signal must be longer than or equal to reference.")
-
-    reference_norm = np.linalg.norm(reference)
-    out = np.zeros(n_lags, dtype=np.float64)
-
-    for k in range(n_lags):
-        segment = signal[k:k + L]
-        denom = reference_norm * np.linalg.norm(segment)
-
-        if denom < eps:
-            out[k] = 0.0
-            continue
-
-        c = np.dot(reference, segment) / denom
-
-        if use_abs:
-            out[k] = np.abs(c)
-        else:
-            out[k] = c
-
-    return out
-
-
-# =============================================================================
-# Three UW correlation methods
-# =============================================================================
-
-def phase_diff_feature(x: np.ndarray) -> np.ndarray:
-    """
-    Feature used by method 1:
-
-        y[n] = diff(unwrap(angle(x[n])))
-
-    This is approximately instantaneous phase increment in rad/sample.
-    """
-
-    x = np.asarray(x, dtype=np.complex128).reshape(-1)
-    return np.diff(np.unwrap(np.angle(x)))
-
-
-def differential_complex_feature(x: np.ndarray) -> np.ndarray:
-    """
-    Feature used by method 3:
-
-        y[n] = x[n] * conj(x[n-1])
-
-    This keeps the differential phase as a complex phasor.
-    """
-
-    x = np.asarray(x, dtype=np.complex128).reshape(-1)
-    return x[1:] * np.conj(x[:-1])
-
-
-def compute_uw_correlation_methods(
-    rx_signal: np.ndarray,
-    uw_reference_signal: np.ndarray,
-) -> dict:
-    """
-    Computes three normalized UW correlation curves.
-
-    Method 1:
-        correlation after diff(unwrap(angle(signal)))
-
-    Method 2:
-        direct complex correlation between rx signal and UW signal
-
-    Method 3:
-        differential complex correlation
-    """
-
-    rx_signal = np.asarray(rx_signal, dtype=np.complex128).reshape(-1)
-    uw_reference_signal = np.asarray(uw_reference_signal, dtype=np.complex128).reshape(-1)
-
-    # -------------------------------------------------------------------------
-    # 1. Correlation after diff(unwrap(angle(signal)))
-    # -------------------------------------------------------------------------
-    rx_phase_diff = phase_diff_feature(rx_signal)
-    uw_phase_diff = phase_diff_feature(uw_reference_signal)
-
-    corr_phase_diff = normalized_sliding_real_correlation(
-        signal=rx_phase_diff,
-        reference=uw_phase_diff,
-        use_abs=True,
-    )
-
-    # -------------------------------------------------------------------------
-    # 2. Direct complex correlation
-    # -------------------------------------------------------------------------
-    corr_complex = normalized_sliding_complex_correlation(
-        signal=rx_signal,
-        reference=uw_reference_signal,
-        use_abs=True,
-    )
-
-    # -------------------------------------------------------------------------
-    # 3. Differential complex correlation
-    # -------------------------------------------------------------------------
-    rx_diff_complex = differential_complex_feature(rx_signal)
-    uw_diff_complex = differential_complex_feature(uw_reference_signal)
-
-    corr_diff_complex = normalized_sliding_complex_correlation(
-        signal=rx_diff_complex,
-        reference=uw_diff_complex,
-        use_abs=True,
-    )
-
-    return {
-        "phase_diff": corr_phase_diff,
-        "complex": corr_complex,
-        "diff_complex": corr_diff_complex,
-    }
-
-
-def summarize_peak(corr: np.ndarray) -> dict:
-    peak_index = int(np.argmax(corr))
-    peak_value = float(corr[peak_index])
-
-    return {
-        "peak_index": peak_index,
-        "peak_value": peak_value,
-    }
-
-
-# =============================================================================
-# Signal generation
-# =============================================================================
-
-def build_modulator():
-    sample_rate = 10_000
-    symbol_time = 1e-3
-
-    pulse_shape_type = "rect"
-    span_in_symbols = 1
-    pulse_normalization = "cpfsk"
-
-    constellation_type = "PAM"
-    constellation_order = 4
-
+def build_modulator(config: UwCorrelationQualityConfig) -> Modulator:
     pulse_shape_config = PulseShapeConfig(
-        pulse_shape_type=pulse_shape_type,
-        normalization_type=pulse_normalization,
-        span_in_symbols=span_in_symbols,
+        pulse_shape_type=config.pulse_shape_type,
+        normalization_type=config.pulse_normalization,
+        span_in_symbols=config.span_in_symbols,
     )
-
     constellation_config = ConstellationConfig(
-        constellation_type=constellation_type,
-        constellation_order=constellation_order,
+        constellation_type=config.constellation_type,
+        constellation_order=config.constellation_order,
     )
-
-    modulator = Modulator(
+    return Modulator(
         ModulatorConfig(
             pulse_shape_config=pulse_shape_config,
             constellation_config=constellation_config,
         )
     )
 
-    return modulator, sample_rate, symbol_time, constellation_order
 
-
-def generate_test_signal(
-    rng: np.random.Generator,
-    modulator: Modulator,
-    sample_rate: float,
-    symbol_time: float,
-    constellation_order: int,
-    n_payload_bits: int,
-    uw_n_bits: int,
-    frequency_sensitivity: float,
-    frequency_offset_hz: float,
-    snr_db: float | None,
-):
-    """
-    Generates:
-
-        rx_signal
-        clean_tx_signal
-        uw_reference_signal
-        tx_bits_with_uw
-
-    Important:
-    The UW is generated separately as a known bit pattern.
-    The full signal is generated using the same UW at the beginning.
-    """
-
-    bits_per_symbol = int(np.log2(constellation_order))
-
-    n_payload_bits = (n_payload_bits // bits_per_symbol) * bits_per_symbol
-    uw_n_bits = (uw_n_bits // bits_per_symbol) * bits_per_symbol
-
-    payload_bits = rng.integers(0, 2, size=n_payload_bits, dtype=np.uint8)
-
-    # A fixed UW pattern with good transitions.
-    # You may replace this with your real UW.
-    uw_bits = rng.integers(0, 2, size=uw_n_bits, dtype=np.uint8)
-
-    # Full signal: UW + payload.
-    # I assume your modulator prepends uw to bits, based on your previous script.
-    tx_signal, tx_bits_with_uw = modulator.modulate(
-        bits=payload_bits,
-        symbol_time=symbol_time,
-        sample_rate=sample_rate,
-        uw=uw_bits,
-        frequency_offset=0.0,
-        frequency_sensitivity=frequency_sensitivity,
+def build_unmodulated_uw(
+        uw_bits: np.ndarray,
+        config: UwCorrelationQualityConfig,
+) -> np.ndarray:
+    pulse_shape_config = PulseShapeConfig(
+        pulse_shape_type=config.pulse_shape_type,
+        normalization_type=config.pulse_normalization,
+        span_in_symbols=config.span_in_symbols,
+    )
+    constellation_config = ConstellationConfig(
+        constellation_type=config.constellation_type,
+        constellation_order=config.constellation_order,
     )
 
-    # UW-only reference, generated without CFO.
-    uw_reference_signal, _ = modulator.modulate(
+    coding = Coding(CodingConfig(constellation=constellation_config))
+    constellation_points = np.arange(config.constellation_order) * 2 + 1 - config.constellation_order
+    symbols = coding.generate_bits_to_symbols(
+        bits_array=np.asarray(uw_bits, dtype=np.uint8),
+        constellation_points=constellation_points,
+    )
+
+    sps = int(round(config.sample_rate * config.symbol_time))
+    upsampled = np.zeros(len(symbols) * sps, dtype=symbols.dtype)
+    upsampled[::sps] = symbols
+
+    pulse = PulseShape(pulse_shape_config).generate_pulse_shape(
+        sample_rate=config.sample_rate,
+        symbol_time=config.symbol_time,
+    )
+
+    return np.convolve(upsampled, pulse, mode="full")
+
+
+def build_uw_references(
+        config: UwCorrelationQualityConfig,
+) -> dict[str, np.ndarray]:
+    uw_bits = np.asarray(config.uw_bits, dtype=np.uint8)
+    modulator = build_modulator(config)
+
+    cpfsk_uw, _ = modulator.modulate(
         bits=np.array([], dtype=np.uint8),
-        symbol_time=symbol_time,
-        sample_rate=sample_rate,
+        symbol_time=config.symbol_time,
+        sample_rate=config.sample_rate,
         uw=uw_bits,
         frequency_offset=0.0,
-        frequency_sensitivity=frequency_sensitivity,
+        frequency_sensitivity=config.frequency_sensitivity,
     )
 
-    # Apply CFO externally, so the same clean signal can be reused.
+    return {
+        "cpfsk_uw": cpfsk_uw,
+        "unmodulated_uw": build_unmodulated_uw(
+            uw_bits=uw_bits,
+            config=config,
+        ),
+    }
+
+
+def generate_trial_signal(
+        config: UwCorrelationQualityConfig,
+        rng: np.random.Generator,
+        frequency_offset_hz: float,
+        snr_db: float | None,
+) -> dict[str, Any]:
+    bits_per_symbol = int(np.log2(config.constellation_order))
+    n_payload_bits = (config.n_payload_bits // bits_per_symbol) * bits_per_symbol
+    payload_bits = rng.integers(0, 2, size=n_payload_bits, dtype=np.uint8)
+    uw_bits = np.asarray(config.uw_bits, dtype=np.uint8)
+
+    tx_signal, _ = build_modulator(config).modulate(
+        bits=payload_bits,
+        symbol_time=config.symbol_time,
+        sample_rate=config.sample_rate,
+        uw=uw_bits,
+        frequency_offset=0.0,
+        frequency_sensitivity=config.frequency_sensitivity,
+    )
+
     rx_signal = apply_frequency_offset(
         signal=tx_signal,
         frequency_offset_hz=frequency_offset_hz,
-        sample_rate=sample_rate,
+        sample_rate=config.sample_rate,
     )
+
+    if config.leading_noise_samples > 0:
+        leading_noise = (
+                rng.standard_normal(config.leading_noise_samples) +
+                1j * rng.standard_normal(config.leading_noise_samples)
+        ) / np.sqrt(2.0)
+        rx_signal = np.concatenate((leading_noise, rx_signal))
 
     if snr_db is not None:
         rx_signal = add_awgn_by_snr(
@@ -335,302 +185,302 @@ def generate_test_signal(
 
     return {
         "rx_signal": rx_signal,
-        "clean_tx_signal": tx_signal,
-        "uw_reference_signal": uw_reference_signal,
-        "uw_bits": uw_bits,
-        "payload_bits": payload_bits,
-        "tx_bits_with_uw": tx_bits_with_uw,
+        "true_uw_start_sample": config.leading_noise_samples,
     }
 
 
-# =============================================================================
-# Plotting
-# =============================================================================
+def expected_correlation_index(
+        method_name: str,
+        config: UwCorrelationQualityConfig,
+        references: dict[str, np.ndarray],
+) -> int:
+    if method_name == "complex_correlation":
+        reference_length = len(references["cpfsk_uw"])
+    elif method_name == "regular_correlation":
+        reference_length = len(references["unmodulated_uw"]) - 1
+    elif method_name == "differential_correlation":
+        reference_length = len(references["cpfsk_uw"]) - 1
+    else:
+        raise NotImplementedError
 
-def plot_correlation_curves(
-    correlations: dict,
-    title: str,
-    true_uw_start_sample: int = 0,
-):
-    plt.figure(figsize=(11, 5))
-
-    plt.plot(
-        correlations["phase_diff"],
-        label="1. corr after diff(unwrap(angle))",
-    )
-
-    plt.plot(
-        correlations["complex"],
-        label="2. complex signal correlation",
-    )
-
-    plt.plot(
-        correlations["diff_complex"],
-        label="3. differential complex correlation",
-    )
-
-    plt.axvline(
-        true_uw_start_sample,
-        linestyle="--",
-        label="true UW start",
-    )
-
-    plt.grid(True)
-    plt.xlabel("Lag [samples]")
-    plt.ylabel("Normalized correlation")
-    plt.title(title)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+    # UwDetector.normalized_correlation currently uses full convolution.
+    return config.leading_noise_samples + reference_length - 1
 
 
-def plot_zoomed_correlation_curves(
-    correlations: dict,
-    title: str,
-    max_lag_to_show: int,
-    true_uw_start_sample: int = 0,
-):
-    plt.figure(figsize=(11, 5))
+def largest_false_peak(
+        correlation: np.ndarray,
+        true_peak_index: int,
+        guard_samples: int,
+) -> float:
+    mask = np.ones(len(correlation), dtype=bool)
+    start = max(0, true_peak_index - guard_samples)
+    stop = min(len(correlation), true_peak_index + guard_samples + 1)
+    mask[start:stop] = False
 
-    for key, label in [
-        ("phase_diff", "1. corr after diff(unwrap(angle))"),
-        ("complex", "2. complex signal correlation"),
-        ("diff_complex", "3. differential complex correlation"),
-    ]:
-        y = correlations[key]
-        stop = min(max_lag_to_show, len(y))
-        plt.plot(np.arange(stop), y[:stop], label=label)
+    if not np.any(mask):
+        return float("nan")
 
-    plt.axvline(
-        true_uw_start_sample,
-        linestyle="--",
-        label="true UW start",
-    )
-
-    plt.grid(True)
-    plt.xlabel("Lag [samples]")
-    plt.ylabel("Normalized correlation")
-    plt.title(title)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+    return float(np.nanmax(correlation[mask]))
 
 
-def plot_peak_summary(
-    summary_rows: list[dict],
-    title: str,
-):
-    labels = [row["method"] for row in summary_rows]
-    values = [row["peak_value"] for row in summary_rows]
+def summarize_correlation(
+        correlation: np.ndarray,
+        expected_index: int,
+        guard_samples: int,
+) -> dict[str, float]:
+    correlation = np.asarray(correlation, dtype=float).reshape(-1)
+    max_peak_index = int(np.nanargmax(correlation))
+    max_peak = float(correlation[max_peak_index])
 
-    x = np.arange(len(labels))
-
-    plt.figure(figsize=(9, 5))
-    plt.bar(x, values)
-    plt.xticks(x, labels, rotation=20, ha="right")
-    plt.ylim([0.0, 1.05])
-    plt.grid(True, axis="y")
-    plt.ylabel("Peak normalized correlation")
-    plt.title(title)
-    plt.tight_layout()
-    plt.show()
-
-
-def print_summary(
-    scenario_name: str,
-    correlations: dict,
-):
-    print()
-    print("=" * 90)
-    print(scenario_name)
-    print("=" * 90)
-
-    for key, label in [
-        ("phase_diff", "1. corr after diff(unwrap(angle))"),
-        ("complex", "2. complex signal correlation"),
-        ("diff_complex", "3. differential complex correlation"),
-    ]:
-        peak = summarize_peak(correlations[key])
-        print(
-            f"{label:<45} | "
-            f"peak lag = {peak['peak_index']:>6d} samples | "
-            f"peak value = {peak['peak_value']:.6f}"
-        )
-
-
-# =============================================================================
-# Main experiment
-# =============================================================================
-
-def run_scenario(
-    scenario_name: str,
-    frequency_offset_hz: float,
-    snr_db: float | None,
-    rng_seed: int = 0,
-):
-    rng = np.random.default_rng(rng_seed)
-
-    modulator, sample_rate, symbol_time, constellation_order = build_modulator()
-
-    # -------------------------------------------------------------------------
-    # Parameters
-    # -------------------------------------------------------------------------
-    n_payload_bits = 4000
-    uw_n_bits = 20
-
-    frequency_sensitivity = 0.5
-
-    sps = int(round(sample_rate * symbol_time))
-
-    data = generate_test_signal(
-        rng=rng,
-        modulator=modulator,
-        sample_rate=sample_rate,
-        symbol_time=symbol_time,
-        constellation_order=constellation_order,
-        n_payload_bits=n_payload_bits,
-        uw_n_bits=uw_n_bits,
-        frequency_sensitivity=frequency_sensitivity,
-        frequency_offset_hz=frequency_offset_hz,
-        snr_db=snr_db,
-    )
-
-    rx_signal = data["rx_signal"]
-    uw_reference_signal = data["uw_reference_signal"]
-
-    correlations = compute_uw_correlation_methods(
-        rx_signal=rx_signal,
-        uw_reference_signal=uw_reference_signal,
-    )
-
-    print_summary(
-        scenario_name=scenario_name,
-        correlations=correlations,
-    )
-
-    title_suffix = (
-        f"CFO = {frequency_offset_hz} Hz, "
-        f"SNR = {'clean' if snr_db is None else str(snr_db) + ' dB'}"
-    )
-
-    plot_correlation_curves(
-        correlations=correlations,
-        title=f"UW normalized correlation comparison\n{title_suffix}",
-        true_uw_start_sample=0,
-    )
-
-    plot_zoomed_correlation_curves(
-        correlations=correlations,
-        title=f"UW normalized correlation comparison, zoom near UW\n{title_suffix}",
-        max_lag_to_show=25 * sps,
-        true_uw_start_sample=0,
-    )
-
-    summary_rows = []
-
-    for key, method_name in [
-        ("phase_diff", "phase diff"),
-        ("complex", "complex"),
-        ("diff_complex", "diff complex"),
-    ]:
-        peak = summarize_peak(correlations[key])
-        summary_rows.append(
-            {
-                "method": method_name,
-                "peak_index": peak["peak_index"],
-                "peak_value": peak["peak_value"],
-            }
-        )
-
-    plot_peak_summary(
-        summary_rows=summary_rows,
-        title=f"Peak UW correlation value\n{title_suffix}",
+    true_peak = float(correlation[expected_index]) if 0 <= expected_index < len(correlation) else float("nan")
+    false_peak = largest_false_peak(
+        correlation=correlation,
+        true_peak_index=expected_index,
+        guard_samples=guard_samples,
     )
 
     return {
-        "scenario_name": scenario_name,
-        "frequency_offset_hz": frequency_offset_hz,
-        "snr_db": snr_db,
-        "correlations": correlations,
-        "data": data,
-        "sample_rate": sample_rate,
-        "symbol_time": symbol_time,
+        "true_peak": true_peak,
+        "max_peak": max_peak,
+        "largest_false_peak": false_peak,
+        "peak_margin": true_peak - false_peak,
+        "max_peak_index": float(max_peak_index),
+        "peak_index_error": float(max_peak_index - expected_index),
     }
 
 
-def compare_no_cfo_vs_cfo():
-    # Clean or noisy?
-    # Use None for no noise.
-    # Use e.g. 10, 5, 0 dB to test realistic behavior.
-    snr_db = 0
+def run_detectors(
+        rx_signal: np.ndarray,
+        references: dict[str, np.ndarray],
+        config: UwCorrelationQualityConfig,
+) -> dict[str, np.ndarray]:
+    return {
+        "complex_correlation": UwDetector("complex_correlation").estimate(
+            signal=rx_signal,
+            cpfsk_uw=references["cpfsk_uw"],
+        ),
+        "regular_correlation": UwDetector("regular_correlation").estimate(
+            signal=rx_signal,
+            cpfsk_uw=references["cpfsk_uw"],
+        ),
+        "differential_correlation": UwDetector("differential_correlation").estimate(
+            signal=rx_signal,
+            cpfsk_uw=references["cpfsk_uw"],
+        ),
+    }
 
-    result_no_cfo = run_scenario(
-        scenario_name="Scenario 1: without frequency offset",
-        frequency_offset_hz=0.0,
-        snr_db=snr_db,
-        rng_seed=0,
-    )
 
-    result_with_cfo = run_scenario(
-        scenario_name="Scenario 2: with frequency offset",
-        frequency_offset_hz=200.0,
-        snr_db=snr_db,
-        rng_seed=0,
-    )
-
-    # -------------------------------------------------------------------------
-    # Side-by-side comparison per method
-    # -------------------------------------------------------------------------
+def evaluate_uw_detection_quality(
+        config: UwCorrelationQualityConfig,
+) -> dict:
+    rng = np.random.default_rng(config.random_seed)
+    references = build_uw_references(config)
     methods = [
-        ("phase_diff", "1. corr after diff(unwrap(angle))"),
-        ("complex", "2. complex signal correlation"),
-        ("diff_complex", "3. differential complex correlation"),
+        "complex_correlation",
+        "regular_correlation",
+        "differential_correlation",
+    ]
+    metrics = [
+        "true_peak",
+        "max_peak",
+        "largest_false_peak",
+        "peak_margin",
+        "max_peak_index",
+        "peak_index_error",
     ]
 
-    for key, label in methods:
-        corr_no_cfo = result_no_cfo["correlations"][key]
-        corr_with_cfo = result_with_cfo["correlations"][key]
+    guard_samples = int(round(config.sample_rate * config.symbol_time))
+    results: dict[float, dict[float | None, dict[str, dict[str, float]]]] = {}
+    example_correlations: dict[tuple[float, float | None], dict[str, np.ndarray]] = {}
 
-        plt.figure(figsize=(11, 5))
-        plt.plot(corr_no_cfo, label="without CFO")
-        plt.plot(corr_with_cfo, label="with CFO")
-        plt.axvline(0, linestyle="--", label="true UW start")
+    for frequency_offset_hz in config.frequency_offsets_hz:
+        results[frequency_offset_hz] = {}
+
+        for snr_db in config.snr_db_values:
+            per_method_trials = {
+                method_name: {metric: [] for metric in metrics}
+                for method_name in methods
+            }
+
+            for trial_index in range(config.n_trials_per_snr):
+                trial = generate_trial_signal(
+                    config=config,
+                    rng=rng,
+                    frequency_offset_hz=frequency_offset_hz,
+                    snr_db=snr_db,
+                )
+
+                correlations = run_detectors(
+                    rx_signal=trial["rx_signal"],
+                    references=references,
+                    config=config,
+                )
+
+                if trial_index == 0:
+                    example_correlations[(frequency_offset_hz, snr_db)] = correlations
+
+                for method_name, correlation in correlations.items():
+                    expected_index = expected_correlation_index(
+                        method_name=method_name,
+                        config=config,
+                        references=references,
+                    )
+                    summary = summarize_correlation(
+                        correlation=correlation,
+                        expected_index=expected_index,
+                        guard_samples=guard_samples,
+                    )
+
+                    for metric in metrics:
+                        per_method_trials[method_name][metric].append(summary[metric])
+
+            results[frequency_offset_hz][snr_db] = {
+                method_name: {
+                    metric: float(np.nanmean(per_method_trials[method_name][metric]))
+                    for metric in metrics
+                }
+                for method_name in methods
+            }
+
+            print_summary_for_condition(
+                frequency_offset_hz=frequency_offset_hz,
+                snr_db=snr_db,
+                condition_results=results[frequency_offset_hz][snr_db],
+            )
+
+    return {
+        "results": results,
+        "example_correlations": example_correlations,
+        "references": references,
+    }
+
+
+def snr_label(snr_db: float | None) -> str:
+    return "clean" if snr_db is None else f"{snr_db:g} dB"
+
+
+def print_summary_for_condition(
+        frequency_offset_hz: float,
+        snr_db: float | None,
+        condition_results: dict[str, dict[str, float]],
+) -> None:
+    print()
+    print("=" * 118)
+    print(f"CFO = {frequency_offset_hz:g} Hz | SNR = {snr_label(snr_db)}")
+    print("=" * 118)
+    print(
+        f"{'method':<26} | "
+        f"{'true peak':>10} | "
+        f"{'max peak':>10} | "
+        f"{'false peak':>10} | "
+        f"{'margin':>10} | "
+        f"{'idx error':>10}"
+    )
+    print("-" * 118)
+
+    for method_name, method_result in condition_results.items():
+        print(
+            f"{method_name:<26} | "
+            f"{method_result['true_peak']:>10.4f} | "
+            f"{method_result['max_peak']:>10.4f} | "
+            f"{method_result['largest_false_peak']:>10.4f} | "
+            f"{method_result['peak_margin']:>10.4f} | "
+            f"{method_result['peak_index_error']:>10.1f}"
+        )
+
+
+def plot_example_correlations(
+        config: UwCorrelationQualityConfig,
+        example_correlations: dict[tuple[float, float | None], dict[str, np.ndarray]],
+        references: dict[str, np.ndarray],
+) -> None:
+    if not config.plot_correlations:
+        return
+
+    for (frequency_offset_hz, snr_db), correlations in example_correlations.items():
+        for method_name, correlation in correlations.items():
+            plt.figure(figsize=(11, 5))
+
+            stop = min(config.max_lags_to_plot, len(correlation))
+            plt.plot(
+                np.arange(stop),
+                correlation[:stop],
+                label=method_name,
+            )
+
+            expected_index = expected_correlation_index(
+                method_name=method_name,
+                config=config,
+                references=references,
+            )
+            if expected_index < config.max_lags_to_plot:
+                plt.axvline(expected_index, linestyle="--", label="expected UW peak")
+
+            plt.grid(True)
+            plt.xlabel("Correlation index")
+            plt.ylabel("Normalized correlation magnitude")
+            plt.title(
+                f"{method_name} | "
+                f"CFO={frequency_offset_hz:g} Hz | "
+                f"SNR={snr_label(snr_db)}"
+            )
+            plt.legend()
+            plt.tight_layout()
+            plt.show()
+
+
+def plot_metric_vs_snr(
+        config: UwCorrelationQualityConfig,
+        results: dict,
+        metric: str,
+) -> None:
+    for frequency_offset_hz, results_for_cfo in results.items():
+        plt.figure(figsize=(9, 5))
+
+        x_values = [
+            100.0 if snr_db is None else float(snr_db)
+            for snr_db in config.snr_db_values
+        ]
+
+        for method_name in next(iter(results_for_cfo.values())).keys():
+            y_values = [
+                results_for_cfo[snr_db][method_name][metric]
+                for snr_db in config.snr_db_values
+            ]
+            plt.plot(x_values, y_values, marker="o", label=method_name)
+
         plt.grid(True)
-        plt.xlabel("Lag [samples]")
-        plt.ylabel("Normalized correlation")
-        plt.title(f"{label}\nNo CFO vs CFO")
+        plt.xlabel("SNR [dB] (clean shown as 100 dB)")
+        plt.ylabel(metric)
+        plt.title(f"{metric} vs SNR | CFO={frequency_offset_hz:g} Hz")
         plt.legend()
         plt.tight_layout()
         plt.show()
 
-    # -------------------------------------------------------------------------
-    # Compact final summary table
-    # -------------------------------------------------------------------------
-    print()
-    print("=" * 100)
-    print("Final comparison summary")
-    print("=" * 100)
-    print(
-        f"{'Method':<45} | "
-        f"{'Peak no CFO':>12} | "
-        f"{'Lag no CFO':>10} | "
-        f"{'Peak CFO':>12} | "
-        f"{'Lag CFO':>10}"
-    )
-    print("-" * 100)
-
-    for key, label in methods:
-        peak_no_cfo = summarize_peak(result_no_cfo["correlations"][key])
-        peak_with_cfo = summarize_peak(result_with_cfo["correlations"][key])
-
-        print(
-            f"{label:<45} | "
-            f"{peak_no_cfo['peak_value']:>12.6f} | "
-            f"{peak_no_cfo['peak_index']:>10d} | "
-            f"{peak_with_cfo['peak_value']:>12.6f} | "
-            f"{peak_with_cfo['peak_index']:>10d}"
-        )
-
 
 if __name__ == "__main__":
-    compare_no_cfo_vs_cfo()
+    config = UwCorrelationQualityConfig(
+        snr_db_values=(0.0, 2.0),
+        frequency_offsets_hz=(0.0, 50.0),
+        n_trials_per_snr=5,
+    )
+
+    output = evaluate_uw_detection_quality(config)
+
+    plot_example_correlations(
+        config=config,
+        example_correlations=output["example_correlations"],
+        references=output["references"],
+    )
+
+    plot_metric_vs_snr(
+        config=config,
+        results=output["results"],
+        metric="peak_margin",
+    )
+
+    plot_metric_vs_snr(
+        config=config,
+        results=output["results"],
+        metric="largest_false_peak",
+    )
