@@ -144,7 +144,7 @@ class BerEvaluator:
 if __name__ == "__main__":
 
     dataset_cfg = DatasetConfig(
-        sample_rate=10_0000,
+        sample_rate=100000,
         symbol_time=1e-3,
         n_bits_to_transmit=100000,
 
