@@ -1,6 +1,7 @@
 from typing import Union
 
 import numpy as np
+import scipy.signal as sp
 
 EPS = 1e-12
 
@@ -9,6 +10,18 @@ class FrequencyOffsetEstimator:
     def __init__(self, method_type: str, reference_signal: Union[np.ndarray, None]):
         self.method_type = method_type
         self.reference_signal = reference_signal
+
+
+    @staticmethod
+    def normalized_correlation(signal: np.ndarray, uw: np.ndarray) -> np.ndarray:
+        non_normalized_correlation = sp.convolve(signal, np.conj(uw[::-1]))
+
+        sliding_signal_energy = np.sqrt(sp.convolve(np.abs(signal) ** 2, np.ones_like(uw)))
+        uw_energy = np.linalg.norm(uw, ord=2)
+
+        normalize_correlation = non_normalized_correlation / (sliding_signal_energy * uw_energy)
+
+        return normalize_correlation
 
 
     @staticmethod
@@ -53,6 +66,34 @@ class FrequencyOffsetEstimator:
         mean_differential_phasor = np.mean(differential_rx)
 
         phase_increment_rad = np.angle(mean_differential_phasor)
+
+        estimated_offset_hz = phase_increment_rad * sample_rate / (2.0 * np.pi)
+
+        return float(estimated_offset_hz)
+
+
+
+    def differential_second_method_for_coarse_estimation(self, signal: np.ndarray, reference_signal: np.ndarray, sample_rate: float) -> float:
+        signal = np.asarray(signal, dtype=np.complex64).reshape(-1)
+        reference_signal = np.asarray(reference_signal, dtype=np.complex64).reshape(-1)
+
+        n_samples = min(len(signal), len(reference_signal))
+        if n_samples < 2:
+            return 0.0
+
+        signal = signal[:n_samples]
+        reference_signal = reference_signal[:n_samples]
+
+        signal = signal / np.maximum(np.abs(signal), EPS)
+        reference_signal = reference_signal / np.maximum(np.abs(reference_signal), EPS)
+
+        differential_rx = signal[1:] * np.conj(signal[:-1])
+        differential_reference = reference_signal[1:] * np.conj(reference_signal[:-1])
+
+        correlation = self.normalized_correlation(differential_rx, differential_reference)
+
+        peak_index = int(np.argmax(np.abs(correlation)))
+        phase_increment_rad = np.angle(correlation[peak_index])
 
         estimated_offset_hz = phase_increment_rad * sample_rate / (2.0 * np.pi)
 
@@ -125,6 +166,16 @@ class FrequencyOffsetEstimator:
             if reference_signal is None:
                 raise ValueError("reference_signal is required for differential_data_aided estimation")
             frequency_offset_estimation = self.differential_data_aided_estimation(signal, reference_signal, sample_rate)
+        elif self.method_type == "differential_second_method":
+            if reference_signal is None:
+                reference_signal = self.reference_signal
+            if reference_signal is None:
+                raise ValueError("reference_signal is required for differential_second_method estimation")
+            frequency_offset_estimation = self.differential_second_method_for_coarse_estimation(
+                signal=signal,
+                reference_signal=reference_signal,
+                sample_rate=sample_rate,
+            )
         else:
             raise NotImplementedError
         return frequency_offset_estimation

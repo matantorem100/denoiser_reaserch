@@ -289,6 +289,7 @@ class Demodulator:
         circular_error = np.angle(np.exp(1j * (wrapped - phase_grid)))
         return int(np.argmin(np.abs(circular_error)))
 
+
     def coherent_fm_viterbi_demodulate(self, rx_signal: np.ndarray, symbol_time: float, sample_rate: float,
                                        n_phase_states: int = 8, frequency_sensitivity: float = 0.5) -> np.ndarray:
         """

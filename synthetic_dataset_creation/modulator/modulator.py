@@ -69,7 +69,7 @@ class Modulator:
 
         sps = int(symbol_time * sample_rate)
 
-        upsampled_symbols = np.zeros(symbols.shape[0] * sps, dtype=symbols.dtype)
+        upsampled_symbols = np.zeros((symbols.shape[0] - 1) * sps + 1, dtype=symbols.dtype)
         upsampled_symbols[::sps] = symbols
 
         pulse_shape = self._pulse_shape_instance.generate_pulse_shape(sample_rate, symbol_time)

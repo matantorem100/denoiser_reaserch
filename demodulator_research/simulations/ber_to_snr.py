@@ -100,10 +100,10 @@ class BerEvaluator:
                 rx_signal = sample["rx_signal"]
 
                 for method in self.config.demodulation_methods:
-                    estimated_frequency_offset = FrequencyOffsetEstimator(self.config.sample_rate).estimate(rx_signal)
-                    real_offset = dataset[noise_db][signal_idx]["frequency_offset"]
-                    print(f"estimated frequency offset: {estimated_frequency_offset}, the real frequency offset: {real_offset}")
-                    corrected_rx = FrequencyOffsetEstimator(self.config.sample_rate).correct_frequency_offset(rx_signal, estimated_frequency_offset)
+                    # estimated_frequency_offset = FrequencyOffsetEstimator(self.config.sample_rate).estimate(rx_signal)
+                    # real_offset = dataset[noise_db][signal_idx]["frequency_offset"]
+                    # print(f"estimated frequency offset: {estimated_frequency_offset}, the real frequency offset: {real_offset}")
+                    # corrected_rx = FrequencyOffsetEstimator(self.config.sample_rate).correct_frequency_offset(rx_signal, estimated_frequency_offset)
                     rx_bits = self._call_demodulator(method_name=method, rx_signal=rx_signal)
                     ber = self._calculate_ber(tx_bits=tx_bits, rx_bits=rx_bits)
 
@@ -184,7 +184,7 @@ if __name__ == "__main__":
 
         demodulation_methods=[
                               "differentiate",
-                              # "semi_coherent",
+                              "semi_coherent",
                               # "coherent_fm_viterbi"
                               ],
     )

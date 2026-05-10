@@ -25,7 +25,7 @@ class UwCorrelationQualityConfig:
     constellation_order: int = 4
 
     n_payload_bits: int = 4000
-    leading_noise_samples: int = 300
+    leading_noise_samples: int = 0
     n_trials_per_snr: int = 20
     random_seed: int = 0
 
@@ -108,7 +108,7 @@ def build_unmodulated_uw(
     )
 
     sps = int(round(config.sample_rate * config.symbol_time))
-    upsampled = np.zeros(len(symbols) * sps, dtype=symbols.dtype)
+    upsampled = np.zeros((len(symbols) - 1) * sps + 1, dtype=symbols.dtype)
     upsampled[::sps] = symbols
 
     pulse = PulseShape(pulse_shape_config).generate_pulse_shape(
@@ -199,7 +199,8 @@ def expected_correlation_index(
     elif method_name == "regular_correlation":
         reference_length = len(references["unmodulated_uw"]) - 1
     elif method_name == "differential_correlation":
-        reference_length = len(references["cpfsk_uw"]) - 1
+        # UwDetector.differential_correlation uses signal[10:] * conj(signal[:-10]).
+        reference_length = len(references["cpfsk_uw"]) - 10
     else:
         raise NotImplementedError
 
@@ -460,7 +461,7 @@ def plot_metric_vs_snr(
 
 if __name__ == "__main__":
     config = UwCorrelationQualityConfig(
-        snr_db_values=(0.0, 2.0),
+        snr_db_values=(1000.0, 2.0),
         frequency_offsets_hz=(0.0, 50.0),
         n_trials_per_snr=5,
     )
