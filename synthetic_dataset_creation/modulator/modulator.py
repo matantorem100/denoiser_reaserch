@@ -55,7 +55,15 @@ class Modulator:
 
     @staticmethod
     def _build_uw_start_bits(n_bits: int, n_uw: int, uw_len: int, uw_spacing_bits: int | None,
-                             uw_start_bit: int | None, random_uw_start: bool, rng: np.random.Generator | None) -> list[int] | None:
+                             uw_start_bit: int | None, random_uw_start: bool, rng: np.random.Generator | None,
+                             alignment_bits: int = 1) -> list[int] | None:
+
+        if n_uw <= 0:
+            raise ValueError("n_uw must be positive")
+        if alignment_bits <= 0:
+            raise ValueError("alignment_bits must be positive")
+        if uw_len % alignment_bits != 0:
+            raise ValueError("UW length must be divisible by bits_per_symbol")
 
         if uw_start_bit is None and not random_uw_start:
             return None
@@ -65,6 +73,8 @@ class Modulator:
         else:
             if uw_spacing_bits is None:
                 raise ValueError("uw_spacing_bits is required when n_uw > 1")
+            if int(uw_spacing_bits) % alignment_bits != 0:
+                raise ValueError("uw_spacing_bits must be divisible by bits_per_symbol")
             required_span = (n_uw - 1) * int(uw_spacing_bits) + uw_len
 
         if required_span > n_bits:
@@ -75,10 +85,13 @@ class Modulator:
                 raise ValueError("Use either random_uw_start or uw_start_bit, not both")
             if rng is None:
                 rng = np.random.default_rng()
-            first_start = int(rng.integers(0, n_bits - required_span + 1))
+            max_start_symbol = (n_bits - required_span) // alignment_bits
+            first_start = int(rng.integers(0, max_start_symbol + 1)) * alignment_bits
         else:
             first_start = int(uw_start_bit)
 
+        if first_start % alignment_bits != 0:
+            raise ValueError("uw_start_bit must be divisible by bits_per_symbol")
         if first_start < 0 or first_start + required_span > n_bits:
             raise ValueError("UW group does not fit inside bits")
 
@@ -105,13 +118,16 @@ class Modulator:
         if not np.all((uw == 0) | (uw == 1)):
             raise ValueError("uw must contain only 0/1 values")
 
+        bits_per_symbol = int(np.log2(self.config.constellation_config.constellation_order))
         starts = self._build_uw_start_bits(n_bits=len(bits), n_uw=int(n_uw), uw_len=len(uw),
                                            uw_spacing_bits=uw_spacing_bits, uw_start_bit=uw_start_bit,
-                                           random_uw_start=random_uw_start, rng=rng)
+                                           random_uw_start=random_uw_start, rng=rng,
+                                           alignment_bits=bits_per_symbol)
 
         if starts is None:
             if uw_mode != "prepend":
                 raise ValueError("uw_start_bit or random_uw_start is required unless uw_mode='prepend'")
+            self.last_uw_start_bits = [0]
             return np.concatenate((uw, bits)).astype(np.uint8)
 
         if uw_mode == "overwrite":

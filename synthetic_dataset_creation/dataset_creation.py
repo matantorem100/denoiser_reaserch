@@ -17,6 +17,11 @@ class DatasetConfig(pydantic.BaseModel):
     min_frequency_offset: float = -100
     max_frequency_offset: float = 100
     const_frequency_offset: Optional[float] = None
+    frequency_offset_values: Optional[List[float]] = None
+    min_phase_offset: float = 0.0
+    max_phase_offset: float = 0.0
+    const_phase_offset: Optional[float] = 0.0
+    phase_offset_values: Optional[List[float]] = None
     h: float = 0.5
 
     pulse_shape_type: str = "rect"
@@ -34,6 +39,27 @@ class DatasetConfig(pydantic.BaseModel):
     demodulation_methods: List[str] = ["differentiate"]
 
     uw_bits: List[int] = [1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0]
+    uw_probability: float = 1.0
+    n_uw: int = 1
+    uw_spacing_bits: Optional[int] = None
+    uw_start_bit: Optional[int] = None
+    random_uw_start: bool = False
+    uw_mode: str = "prepend"
+    random_seed: Optional[int] = None
+
+    @pydantic.field_validator("uw_probability")
+    @classmethod
+    def validate_uw_probability(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("uw_probability must be in [0, 1]")
+        return value
+
+    @pydantic.field_validator("n_uw")
+    @classmethod
+    def validate_n_uw(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("n_uw must be positive")
+        return value
 
 
 class Dataset:
@@ -60,14 +86,12 @@ class Dataset:
         self.demodulator = Demodulator(demodulator_config)
 
         self.uw_bits = np.asarray(self.config.uw_bits, dtype=np.uint8)
+        self.rng = np.random.default_rng(self.config.random_seed)
+
 
     def _random_bits(self, n_bits: int) -> np.ndarray:
-        """
-        Make sure number of bits is divisible by bits_per_symbol.
-        For PAM4, bits_per_symbol = 2.
-        """
         n_bits = (n_bits // self.bits_per_symbol) * self.bits_per_symbol
-        return np.random.randint(0, 2, size=n_bits, dtype=np.uint8)
+        return self.rng.integers(0, 2, size=n_bits, dtype=np.uint8)
 
 
     def _build_channel(self, noise_db: float) -> Channel:
@@ -75,17 +99,59 @@ class Dataset:
                                        noise_type=self.config.noise_type, noise_db=float(noise_db))
         return Channel(channel_config)
 
-    def generate_one_signal(self, noise_db: float, frequency_offset: Optional[float] = None,
-                            uw: Optional[np.ndarray] = None) -> Dict[str, Any]:
+    def _choose_frequency_offset(self) -> float:
+        if self.config.frequency_offset_values is not None:
+            return float(self.rng.choice(np.asarray(self.config.frequency_offset_values, dtype=float)))
+        if self.config.const_frequency_offset is not None:
+            return float(self.config.const_frequency_offset)
+        return float(self.rng.uniform(self.config.min_frequency_offset, self.config.max_frequency_offset))
+
+    def _choose_phase_offset(self) -> float:
+        if self.config.phase_offset_values is not None:
+            return float(self.rng.choice(np.asarray(self.config.phase_offset_values, dtype=float)))
+        if self.config.const_phase_offset is not None:
+            return float(self.config.const_phase_offset)
+        return float(self.rng.uniform(self.config.min_phase_offset, self.config.max_phase_offset))
+
+    def _choose_has_uw(self) -> bool:
+        if not self.config.use_uw:
+            return False
+        return bool(self.rng.random() < self.config.uw_probability)
+
+    def generate_one_signal(self, noise_db: float) -> Dict[str, Any]:
         """
-        Generate one signal with a specific SNR and frequency offset.
+        This function generates signal in the given snr, n_bits size and:
+        1. frequency offset - one value from frequency_offset_values list if the list in the config is not None OR
+        const_frequency_offset from the config OR random value between min_frequency_offset to max_frequency_offset
+        2. phase_offset - one value from phase_offset_values list if the list in the config is not None OR
+        const_phase_offset from the config OR random value between min_phase_offset to max_phase_offset
+        3. uw - decide whether the signal will have unique word or not. If not then pass None ub the uw field of the
+        modulator. If there is so pass the uw to the modulator
+        :param noise_db: the noise of the current simulated signal
+        :return: the simulated signal
         """
 
+        frequency_offset = self._choose_frequency_offset()
+        phase_offset = self._choose_phase_offset()
+        has_uw = self._choose_has_uw()
+
         bits = self._random_bits(self.config.n_bits_to_transmit)
+        uw_to_modulate = self.uw_bits
+        if not has_uw:
+            uw_to_modulate = None
 
         tx_signal, tx_bits = self.modulator.modulate(bits=bits, symbol_time=self.config.symbol_time,
                                                      sample_rate=self.config.sample_rate,
-                                                     frequency_offset=frequency_offset, uw=uw)
+                                                     frequency_offset=frequency_offset,
+                                                     frequency_sensitivity=self.config.h,
+                                                     phase_offset=phase_offset,
+                                                     uw=uw_to_modulate,
+                                                     n_uw=self.config.n_uw,
+                                                     uw_spacing_bits=self.config.uw_spacing_bits,
+                                                     uw_start_bit=self.config.uw_start_bit,
+                                                     random_uw_start=self.config.random_uw_start,
+                                                     rng=self.rng,
+                                                     uw_mode=self.config.uw_mode)
 
         channel = self._build_channel(noise_db)
         rx_signal = channel.transmit(tx_signal)
@@ -93,7 +159,10 @@ class Dataset:
         return {
             "noise_db": float(noise_db),
             "frequency_offset": float(frequency_offset),
-            "uw_bits": uw.copy(),
+            "phase_offset": float(phase_offset),
+            "has_uw": bool(has_uw),
+            "uw_bits": None if uw_to_modulate is None else uw_to_modulate.copy(),
+            "uw_start_bits": list(self.modulator.last_uw_start_bits),
             "tx_bits": tx_bits,
             "tx_signal": tx_signal,
             "rx_signal": rx_signal,
@@ -124,13 +193,7 @@ class Dataset:
             dataset[noise_db] = {}
 
             for signal_idx in range(self.config.n_signals_per_snr):
-                if self.config.const_frequency_offset is not None:
-                    frequency_offset = self.config.const_frequency_offset
-                else:
-                    frequency_offset = np.random.uniform(self.config.min_frequency_offset, self.config.max_frequency_offset)
-
-                sample = self.generate_one_signal(noise_db=noise_db, frequency_offset=frequency_offset, uw=self.uw_bits)
-
+                sample = self.generate_one_signal(noise_db=noise_db)
                 dataset[noise_db][signal_idx] = sample
 
         return dataset
