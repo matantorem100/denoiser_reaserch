@@ -5,8 +5,9 @@ EPS = 1e-12
 
 
 class UwDetector:
-    def __init__(self, method_type: str):
+    def __init__(self, method_type: str, differential_lag_samples: int = 1):
         self.method_type = method_type
+        self.differential_lag_samples = int(differential_lag_samples)
 
     @staticmethod
     def normalized_correlation(signal: np.ndarray, uw: np.ndarray) -> np.ndarray:
@@ -21,24 +22,12 @@ class UwDetector:
 
 
     def complex_correlation(self, signal: np.ndarray, cpfsk_uw: np.ndarray) -> np.ndarray:
-        """
-        This function computes the complex correlation between the modulated cpfsk uw and modulated cpfsk signal
-        :param signal: the modulated cpfsk signal
-        :param cpfsk_uw: the modulated cpfsk uw
-        :return: the complex correlation
-        """
         correlation = np.abs(self.normalized_correlation(signal, cpfsk_uw))
 
         return correlation
 
 
     def regular_correlation(self, signal: np.ndarray, cpfsk_uw: np.ndarray) -> np.ndarray:
-        """
-        This function computes the correlation between the diff(unwrap(angle(sig))) to the  uw
-        :param signal: the cpfsk signal
-        :param cpfsk_uw: the modulated cpfsk uw
-        :return: the correlation
-        """
         uw = np.diff(np.unwrap(np.angle(cpfsk_uw)))
         signal = np.diff(np.unwrap(np.angle(signal)))
 
@@ -48,17 +37,13 @@ class UwDetector:
 
 
     def differential_correlation(self, signal: np.ndarray, cpfsk_uw: np.ndarray) -> np.ndarray:
-        """
+        lag = self.differential_lag_samples
 
-        :param signal:
-        :param cpfsk_uw:
-        :return:
-        """
         signal = signal / np.maximum(np.abs(signal), EPS)
-        differential_signal = signal[10:] * np.conj(signal[:-10])
+        differential_signal = signal[lag:] * np.conj(signal[:-lag])
 
         cpfsk_uw = cpfsk_uw / np.maximum(np.abs(cpfsk_uw), EPS)
-        differential_uw = cpfsk_uw[10:] * np.conj(cpfsk_uw[:-10])
+        differential_uw = (cpfsk_uw[lag:]) * np.conj(cpfsk_uw[:-lag])
 
         correlation = np.abs(self.normalized_correlation(differential_signal, differential_uw))
 

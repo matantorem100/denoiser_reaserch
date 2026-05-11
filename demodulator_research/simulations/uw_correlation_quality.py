@@ -199,8 +199,8 @@ def expected_correlation_index(
     elif method_name == "regular_correlation":
         reference_length = len(references["unmodulated_uw"]) - 1
     elif method_name == "differential_correlation":
-        # UwDetector.differential_correlation uses signal[10:] * conj(signal[:-10]).
-        reference_length = len(references["cpfsk_uw"]) - 10
+        lag = int(round(config.sample_rate * config.symbol_time))
+        reference_length = len(references["cpfsk_uw"]) - lag
     else:
         raise NotImplementedError
 
@@ -264,7 +264,10 @@ def run_detectors(
             signal=rx_signal,
             cpfsk_uw=references["cpfsk_uw"],
         ),
-        "differential_correlation": UwDetector("differential_correlation").estimate(
+        "differential_correlation": UwDetector(
+            "differential_correlation",
+            differential_lag_samples=int(round(config.sample_rate * config.symbol_time)),
+        ).estimate(
             signal=rx_signal,
             cpfsk_uw=references["cpfsk_uw"],
         ),
@@ -461,8 +464,8 @@ def plot_metric_vs_snr(
 
 if __name__ == "__main__":
     config = UwCorrelationQualityConfig(
-        snr_db_values=(1000.0, 2.0),
-        frequency_offsets_hz=(0.0, 50.0),
+        snr_db_values=(2.0, 1.0, 0),
+        frequency_offsets_hz=(250.0, 0),
         n_trials_per_snr=5,
     )
 
