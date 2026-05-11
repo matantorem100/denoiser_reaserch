@@ -42,10 +42,7 @@ class Channel:
 
             if np.iscomplexobj(signal):
                 noise_std = np.sqrt(n0 / 2.0)
-                noise = noise_std * (
-                        np.random.randn(*signal.shape) +
-                        1j * np.random.randn(*signal.shape)
-                )
+                noise = noise_std * (np.random.randn(*signal.shape) + 1j * np.random.randn(*signal.shape))
             else:
                 noise_std = np.sqrt(n0)
                 noise = noise_std * np.random.randn(*signal.shape)
@@ -62,10 +59,7 @@ class Channel:
 
             if np.iscomplexobj(signal):
                 noise_std = np.sqrt(noise_power / 2.0)
-                noise = noise_std * (
-                        np.random.randn(*signal.shape) +
-                        1j * np.random.randn(*signal.shape)
-                )
+                noise = noise_std * (np.random.randn(*signal.shape) + 1j * np.random.randn(*signal.shape))
             else:
                 noise_std = np.sqrt(noise_power)
                 noise = noise_std * np.random.randn(*signal.shape)
