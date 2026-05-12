@@ -88,7 +88,7 @@ class FrequencyOffsetEstimator:
         reference_signal = reference_signal / np.maximum(np.abs(reference_signal), EPS)
 
         differential_rx = signal[1:] * np.conj(signal[:-1])
-        differential_reference = reference_signal[1:] * np.conj(reference_signal[:-1])
+        differential_reference = np.conj(reference_signal[1:]) * (reference_signal[:-1])
 
         correlation = self.normalized_correlation(differential_rx, differential_reference)
 

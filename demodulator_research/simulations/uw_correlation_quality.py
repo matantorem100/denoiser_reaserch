@@ -1,8 +1,18 @@
 from dataclasses import dataclass
+from pathlib import Path
+import os
+import sys
 from typing import Dict, Any
 
-import matplotlib.pyplot as plt
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+os.environ.setdefault("MPLCONFIGDIR", str(Path("/private/tmp") / "matplotlib-cache"))
+
+import matplotlib.pyplot as plt
 
 from demodulator_research.uw_detection.uw_detection import UwDetector
 from synthetic_dataset_creation.constellation.constellation import ConstellationConfig
@@ -17,8 +27,8 @@ class UwCorrelationQualityConfig:
     symbol_time: float = 1e-3
     frequency_sensitivity: float = 0.5
 
-    pulse_shape_type: str = "rect"
-    span_in_symbols: int = 1
+    pulse_shape_type: str = "rrc"
+    span_in_symbols: int = 5
     pulse_normalization: str = "cpfsk"
 
     constellation_type: str = "PAM"
@@ -26,6 +36,7 @@ class UwCorrelationQualityConfig:
 
     n_payload_bits: int = 4000
     leading_noise_samples: int = 0
+    uw_start_bit: int | None = None
     n_trials_per_snr: int = 20
     random_seed: int = 0
 
@@ -153,6 +164,8 @@ def generate_trial_signal(
     n_payload_bits = (config.n_payload_bits // bits_per_symbol) * bits_per_symbol
     payload_bits = rng.integers(0, 2, size=n_payload_bits, dtype=np.uint8)
     uw_bits = np.asarray(config.uw_bits, dtype=np.uint8)
+    sps = int(round(config.sample_rate * config.symbol_time))
+    uw_start_sample = 0 if config.uw_start_bit is None else int((config.uw_start_bit // bits_per_symbol) * sps)
 
     tx_signal, _ = build_modulator(config).modulate(
         bits=payload_bits,
@@ -161,6 +174,8 @@ def generate_trial_signal(
         uw=uw_bits,
         frequency_offset=0.0,
         frequency_sensitivity=config.frequency_sensitivity,
+        uw_start_bit=config.uw_start_bit,
+        uw_mode="prepend" if config.uw_start_bit is None else "overwrite",
     )
 
     rx_signal = apply_frequency_offset(
@@ -185,7 +200,7 @@ def generate_trial_signal(
 
     return {
         "rx_signal": rx_signal,
-        "true_uw_start_sample": config.leading_noise_samples,
+        "true_uw_start_sample": config.leading_noise_samples + uw_start_sample,
     }
 
 
@@ -193,6 +208,7 @@ def expected_correlation_index(
         method_name: str,
         config: UwCorrelationQualityConfig,
         references: dict[str, np.ndarray],
+        true_uw_start_sample: int | None = None,
 ) -> int:
     if method_name == "complex_correlation":
         reference_length = len(references["cpfsk_uw"])
@@ -205,7 +221,13 @@ def expected_correlation_index(
         raise NotImplementedError
 
     # UwDetector.normalized_correlation currently uses full convolution.
-    return config.leading_noise_samples + reference_length - 1
+    if true_uw_start_sample is None:
+        bits_per_symbol = int(np.log2(config.constellation_order))
+        sps = int(round(config.sample_rate * config.symbol_time))
+        uw_start_sample = 0 if config.uw_start_bit is None else int((config.uw_start_bit // bits_per_symbol) * sps)
+        true_uw_start_sample = config.leading_noise_samples + uw_start_sample
+
+    return int(true_uw_start_sample) + reference_length - 1
 
 
 def largest_false_peak(
@@ -328,6 +350,7 @@ def evaluate_uw_detection_quality(
                         method_name=method_name,
                         config=config,
                         references=references,
+                        true_uw_start_sample=trial["true_uw_start_sample"],
                     )
                     summary = summarize_correlation(
                         correlation=correlation,
@@ -464,9 +487,11 @@ def plot_metric_vs_snr(
 
 if __name__ == "__main__":
     config = UwCorrelationQualityConfig(
-        snr_db_values=(2.0, 1.0, 0),
-        frequency_offsets_hz=(250.0, 0),
+        snr_db_values=(10.0, 5),
+        frequency_offsets_hz=(50, 30),
         n_trials_per_snr=5,
+        uw_start_bit=1000,
+        max_lags_to_plot=7000,
     )
 
     output = evaluate_uw_detection_quality(config)

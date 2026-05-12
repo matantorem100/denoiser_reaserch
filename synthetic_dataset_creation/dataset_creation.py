@@ -39,8 +39,10 @@ class DatasetConfig(pydantic.BaseModel):
     demodulation_methods: List[str] = ["differentiate"]
 
     uw_bits: List[int] = [1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0]
+    use_uw: bool = True
     uw_probability: float = 1.0
     n_uw: int = 1
+    n_uw_values: Optional[List[int]] = None
     uw_spacing_bits: Optional[int] = None
     uw_start_bit: Optional[int] = None
     random_uw_start: bool = False
@@ -59,6 +61,17 @@ class DatasetConfig(pydantic.BaseModel):
     def validate_n_uw(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("n_uw must be positive")
+        return value
+
+    @pydantic.field_validator("n_uw_values")
+    @classmethod
+    def validate_n_uw_values(cls, value: Optional[List[int]]) -> Optional[List[int]]:
+        if value is None:
+            return value
+        if any(n_uw < 0 for n_uw in value):
+            raise ValueError("n_uw_values must contain non-negative integers")
+        if len(value) == 0:
+            raise ValueError("n_uw_values cannot be empty")
         return value
 
 
@@ -118,6 +131,13 @@ class Dataset:
             return False
         return bool(self.rng.random() < self.config.uw_probability)
 
+    def _choose_n_uw(self) -> int:
+        if not self._choose_has_uw():
+            return 0
+        if self.config.n_uw_values is not None:
+            return int(self.rng.choice(np.asarray(self.config.n_uw_values, dtype=int)))
+        return int(self.config.n_uw)
+
     def generate_one_signal(self, noise_db: float) -> Dict[str, Any]:
         """
         This function generates signal in the given snr, n_bits size and:
@@ -133,7 +153,8 @@ class Dataset:
 
         frequency_offset = self._choose_frequency_offset()
         phase_offset = self._choose_phase_offset()
-        has_uw = self._choose_has_uw()
+        n_uw = self._choose_n_uw()
+        has_uw = n_uw > 0
 
         bits = self._random_bits(self.config.n_bits_to_transmit)
         uw_to_modulate = self.uw_bits
@@ -146,7 +167,7 @@ class Dataset:
                                                      frequency_sensitivity=self.config.h,
                                                      phase_offset=phase_offset,
                                                      uw=uw_to_modulate,
-                                                     n_uw=self.config.n_uw,
+                                                     n_uw=max(n_uw, 1),
                                                      uw_spacing_bits=self.config.uw_spacing_bits,
                                                      uw_start_bit=self.config.uw_start_bit,
                                                      random_uw_start=self.config.random_uw_start,
@@ -161,6 +182,7 @@ class Dataset:
             "frequency_offset": float(frequency_offset),
             "phase_offset": float(phase_offset),
             "has_uw": bool(has_uw),
+            "n_uw": int(n_uw),
             "uw_bits": None if uw_to_modulate is None else uw_to_modulate.copy(),
             "uw_start_bits": list(self.modulator.last_uw_start_bits),
             "tx_bits": tx_bits,

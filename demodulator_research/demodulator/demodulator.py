@@ -66,6 +66,9 @@ class Demodulator:
             alpha: float = 0.15,
             beta: float = 0.01,
             use_abs_metric: bool = False,
+            initial_phase: float = 0.0,
+            initial_frequency_hz: float = 0.0,
+            return_trace: bool = False,
     ) -> np.ndarray:
         """
         Semi-coherent CPFSK/FM detector with decision-directed phase/frequency tracking
@@ -169,12 +172,16 @@ class Demodulator:
         n_symbols = len(rx_signal) // sps
 
         decided_symbols = []
+        phase_errors_rad = []
+        phase_states_rad = []
+        residual_frequency_hz = []
+        branch_metrics = []
 
         # CPFSK phase state at the beginning of the current symbol.
-        phase_state = 0.0
+        phase_state = float(initial_phase)
 
         # Residual carrier frequency estimate in Hz.
-        freq_state_hz = 0.0
+        freq_state_hz = float(initial_frequency_hz)
 
         for k in range(n_symbols):
             seg_start = k * sps
@@ -264,12 +271,27 @@ class Demodulator:
             # Keep phase bounded.
             phase_state = np.angle(np.exp(1j * phase_state))
 
+            if return_trace:
+                phase_errors_rad.append(float(phase_error))
+                phase_states_rad.append(float(phase_state))
+                residual_frequency_hz.append(float(freq_state_hz))
+                branch_metrics.append(float(best_metric))
+
         decided_symbols = np.asarray(decided_symbols, dtype=constellation_points.dtype)
 
         bits = self._coding_instance.generate_symbols_to_bits(
             decided_symbols,
             constellation_points,
         )
+
+        if return_trace:
+            trace = {
+                "phase_errors_rad": np.asarray(phase_errors_rad, dtype=np.float64),
+                "phase_states_rad": np.asarray(phase_states_rad, dtype=np.float64),
+                "residual_frequency_hz": np.asarray(residual_frequency_hz, dtype=np.float64),
+                "branch_metrics": np.asarray(branch_metrics, dtype=np.float64),
+            }
+            return bits, trace
 
         return bits
 
