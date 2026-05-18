@@ -47,6 +47,9 @@ class DatasetConfig(pydantic.BaseModel):
     uw_start_bit: Optional[int] = None
     random_uw_start: bool = False
     uw_mode: str = "prepend"
+    first_uw_after_noise: bool = False
+    leading_noise_samples: int = 0
+    noise_only_when_no_uw: bool = False
     random_seed: Optional[int] = None
 
     @pydantic.field_validator("uw_probability")
@@ -72,6 +75,13 @@ class DatasetConfig(pydantic.BaseModel):
             raise ValueError("n_uw_values must contain non-negative integers")
         if len(value) == 0:
             raise ValueError("n_uw_values cannot be empty")
+        return value
+
+    @pydantic.field_validator("leading_noise_samples")
+    @classmethod
+    def validate_leading_noise_samples(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("leading_noise_samples must be non-negative")
         return value
 
 
@@ -111,6 +121,13 @@ class Dataset:
         channel_config = ChannelConfig(channel_type="awgn", bits_per_symbol=self.bits_per_symbol, sps=self.sps,
                                        noise_type=self.config.noise_type, noise_db=float(noise_db))
         return Channel(channel_config)
+
+    def _build_leading_noise(self, channel: Channel, reference_signal: np.ndarray) -> np.ndarray:
+        if self.config.leading_noise_samples <= 0:
+            return np.array([], dtype=np.complex128)
+
+        return channel.generate_awgn(reference_signal=reference_signal, shape=self.config.leading_noise_samples,
+                                     complex_noise=True, rng=self.rng)
 
     def _choose_frequency_offset(self) -> float:
         if self.config.frequency_offset_values is not None:
@@ -161,6 +178,15 @@ class Dataset:
         if not has_uw:
             uw_to_modulate = None
 
+        uw_start_bit = self.config.uw_start_bit
+        random_uw_start = self.config.random_uw_start
+        uw_mode = self.config.uw_mode
+
+        if has_uw and self.config.first_uw_after_noise:
+            uw_start_bit = 0
+            random_uw_start = False
+            uw_mode = "overwrite"
+
         tx_signal, tx_bits = self.modulator.modulate(bits=bits, symbol_time=self.config.symbol_time,
                                                      sample_rate=self.config.sample_rate,
                                                      frequency_offset=frequency_offset,
@@ -169,13 +195,32 @@ class Dataset:
                                                      uw=uw_to_modulate,
                                                      n_uw=max(n_uw, 1),
                                                      uw_spacing_bits=self.config.uw_spacing_bits,
-                                                     uw_start_bit=self.config.uw_start_bit,
-                                                     random_uw_start=self.config.random_uw_start,
+                                                     uw_start_bit=uw_start_bit,
+                                                     random_uw_start=random_uw_start,
                                                      rng=self.rng,
-                                                     uw_mode=self.config.uw_mode)
+                                                     uw_mode=uw_mode)
 
         channel = self._build_channel(noise_db)
-        rx_signal = channel.transmit(tx_signal)
+        if not has_uw and self.config.noise_only_when_no_uw:
+            reference_signal = tx_signal
+            tx_signal = np.zeros_like(tx_signal, dtype=np.complex128)
+            rx_signal = channel.generate_awgn(reference_signal=reference_signal,
+                                              shape=len(tx_signal) + self.config.leading_noise_samples,
+                                              complex_noise=True, rng=self.rng)
+            channel_noise = rx_signal.copy()
+        else:
+            rx_signal, tx_noise = channel.transmit(signal=tx_signal, return_noise=True, rng=self.rng)
+            leading_noise = self._build_leading_noise(channel=channel, reference_signal=tx_signal)
+
+            if leading_noise.size > 0:
+                rx_signal = np.concatenate((leading_noise, rx_signal))
+                channel_noise = np.concatenate((leading_noise, tx_noise))
+            else:
+                channel_noise = tx_noise
+
+        uw_start_bits = list(self.modulator.last_uw_start_bits)
+        uw_start_samples = [self.config.leading_noise_samples + int((start_bit // self.bits_per_symbol) * self.sps)
+                            for start_bit in uw_start_bits]
 
         return {
             "noise_db": float(noise_db),
@@ -183,11 +228,15 @@ class Dataset:
             "phase_offset": float(phase_offset),
             "has_uw": bool(has_uw),
             "n_uw": int(n_uw),
+            "first_uw_after_noise": bool(self.config.first_uw_after_noise and has_uw),
+            "leading_noise_samples": int(self.config.leading_noise_samples),
             "uw_bits": None if uw_to_modulate is None else uw_to_modulate.copy(),
-            "uw_start_bits": list(self.modulator.last_uw_start_bits),
+            "uw_start_bits": uw_start_bits,
+            "uw_start_samples": uw_start_samples,
             "tx_bits": tx_bits,
             "tx_signal": tx_signal,
             "rx_signal": rx_signal,
+            "channel_noise": channel_noise,
         }
 
     def generate_dataset(self) -> Dict[float, Dict[int, Dict[str, Any]]]:
