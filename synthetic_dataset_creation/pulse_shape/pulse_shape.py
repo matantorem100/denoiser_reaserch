@@ -46,8 +46,7 @@ class PulseShape:
         if span <= 0:
             raise ValueError("span_in_symbols must be positive")
 
-        # Build the usual centered RRC samples, then rotate them into a causal frequency pulse.
-        # The semi-coherent detector expects chunk[0] to hold the current symbol's main contribution, not the weak left tail.
+        # Build the usual centered RRC samples.
         num_samples = span * sps + 1
         center_index = num_samples // 2
         t = (np.arange(num_samples) - center_index) / sample_rate
@@ -71,9 +70,7 @@ class PulseShape:
                 denominator = (np.pi * ti / T * (1 - (4 * beta * ti / T) ** 2))
                 pulse[i] = (1 / np.sqrt(T)) * (numerator / denominator)
 
-        causal_pulse = np.roll(pulse, -center_index)
-
-        return self._normalize_pulse(causal_pulse, sample_rate)
+        return self._normalize_pulse(pulse, sample_rate)
 
     def _generate_protocol_pulse(self, sample_rate: float, symbol_time: float) -> np.ndarray:
         beta = self.config.rolloff
