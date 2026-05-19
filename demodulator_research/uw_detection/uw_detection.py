@@ -9,13 +9,11 @@ EPS = 1e-12
 class UwDetector:
     def __init__(self, method_type: str, differential_lag_samples: int = 1,
                  context_references: np.ndarray | None = None,
-                 uw_start_in_context_samples: int | None = None,
-                 gaussian_sigma_samples: float | None = None):
+                 uw_start_in_context_samples: int | None = None):
         self.method_type = method_type
         self.differential_lag_samples = int(differential_lag_samples)
         self.context_references = context_references
         self.uw_start_in_context_samples = uw_start_in_context_samples
-        self.gaussian_sigma_samples = gaussian_sigma_samples
 
     @staticmethod
     def normalized_correlation(signal: np.ndarray, uw: np.ndarray) -> np.ndarray:
@@ -56,20 +54,6 @@ class UwDetector:
         correlation = np.abs(self.normalized_correlation(differential_signal, differential_uw))
 
         return correlation
-
-
-    @staticmethod
-    def gaussian_uw_window(reference_len: int, uw_start: int, uw_len: int,
-                           gaussian_sigma_samples: float | None) -> np.ndarray:
-        if gaussian_sigma_samples is None:
-            gaussian_sigma_samples = max(1.0, uw_len / 2.0)
-
-        sample_index = np.arange(reference_len)
-        uw_center = uw_start + (uw_len - 1) / 2.0
-        window = np.exp(-0.5 * ((sample_index - uw_center) / gaussian_sigma_samples) ** 2)
-        window = window / np.max(window)
-
-        return window
 
 
     @staticmethod
@@ -142,13 +126,17 @@ class UwDetector:
 
     def context_exhaustive_correlation_matrix(self, signal: np.ndarray, cpfsk_uw: np.ndarray) -> np.ndarray:
         """
-        Correlate against every context-padded UW reference.
+        Differentially correlate against every context-padded UW reference.
 
         Returns:
             Matrix with shape (n_context_references, n_lags). Each row is the
-            normalized correlation magnitude for one possible context around
-            the UW. The caller can later reduce it with max/mean or inspect the
-            best context per lag.
+            normalized differential-correlation magnitude for one possible
+            context around the UW.
+
+            The context bits are used to generate the correct CPM waveform
+            around the UW, but only the differential samples belonging to the
+            UW reference interval are correlated. This avoids scoring long
+            before/after context sections as if they were part of the sync word.
         """
         signal = np.asarray(signal, dtype=np.complex128).reshape(-1)
         cpfsk_uw = np.asarray(cpfsk_uw, dtype=np.complex128).reshape(-1)
@@ -169,25 +157,35 @@ class UwDetector:
         if references.size == 0:
             return np.empty((0, 0), dtype=np.float64)
 
+        lag = self.differential_lag_samples
+        signal = signal / np.maximum(np.abs(signal), EPS)
+        differential_signal = signal[lag:] * np.conj(signal[:-lag])
+
         correlations = []
         for reference in references:
             reference = np.asarray(reference, dtype=np.complex128).reshape(-1)
-            if len(reference) == 0:
+            if len(reference) <= lag:
                 continue
 
-            window = self.gaussian_uw_window(
-                reference_len=len(reference),
-                uw_start=uw_start,
-                uw_len=len(cpfsk_uw),
-                gaussian_sigma_samples=self.gaussian_sigma_samples,
-            )
-            weighted_reference = reference * window
+            reference = reference / np.maximum(np.abs(reference), EPS)
+            differential_reference = reference[lag:] * np.conj(reference[:-lag])
+            uw_reference_len = max(0, len(cpfsk_uw) - lag)
+            differential_reference = differential_reference[uw_start:uw_start + uw_reference_len]
+            if len(differential_reference) == 0:
+                continue
 
-            correlation = np.abs(self.normalized_correlation(signal, weighted_reference))
+            correlation = np.abs(self.normalized_correlation(differential_signal, differential_reference))
 
-            # Convert padded-reference peak location back to UW-start peak convention.
-            if uw_start > 0:
-                correlation = correlation[uw_start:]
+            # Full convolution has edge lags where only part of the reference
+            # overlaps the signal. These can create large misleading peaks,
+            # especially when many context hypotheses are tested. Keep only
+            # lags where the full differential reference overlaps the signal.
+            first_full_overlap = len(differential_reference) - 1
+            last_full_overlap = len(differential_signal) - 1
+            if first_full_overlap > 0:
+                correlation[:first_full_overlap] = 0.0
+            if last_full_overlap + 1 < len(correlation):
+                correlation[last_full_overlap + 1:] = 0.0
 
             correlations.append(correlation.astype(np.float64))
 

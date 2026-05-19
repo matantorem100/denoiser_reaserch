@@ -1,10 +1,19 @@
 import numpy as np
+from pathlib import Path
+import os
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+os.environ.setdefault("MPLCONFIGDIR", str(Path("/private/tmp") / "matplotlib-cache"))
+
 import matplotlib.pyplot as plt
 import pydantic
 from typing import Dict, List, Optional, Any
 
 from demodulator_research.demodulator.demodulator import DemodulatorConfig, Demodulator
-from demodulator_research.frequency_offset_estimation.frequency_offset_estimation import FrequencyOffsetEstimator
 from synthetic_dataset_creation.constellation.constellation import ConstellationConfig
 from synthetic_dataset_creation.dataset_creation import DatasetConfig, Dataset
 from synthetic_dataset_creation.pulse_shape.pulse_shape import PulseShapeConfig
@@ -13,6 +22,7 @@ from synthetic_dataset_creation.pulse_shape.pulse_shape import PulseShapeConfig
 class BerEvaluatorConfig(pydantic.BaseModel):
     sample_rate: float = 10_000
     symbol_time: float = 1e-3
+    frequency_sensitivity: float = 0.5
 
     pulse_shape_type: str = "rect"
     span_in_symbols: int = 1
@@ -58,7 +68,12 @@ class BerEvaluator:
             if hasattr(self.demodulator, candidate):
                 fn = getattr(self.demodulator, candidate)
 
-                return fn(rx_signal=rx_signal, symbol_time=self.config.symbol_time, sample_rate=self.config.sample_rate)
+                return fn(
+                    rx_signal=rx_signal,
+                    symbol_time=self.config.symbol_time,
+                    sample_rate=self.config.sample_rate,
+                    frequency_sensitivity=self.config.frequency_sensitivity,
+                )
 
         raise AttributeError(f"Demodulator does not have method for '{method_name}'. "f"Tried: {candidate_names}")
 
@@ -115,7 +130,16 @@ class BerEvaluator:
                 results[method]["ber"][i] = np.mean(ber_values)
                 results[method]["ber_std"][i] = np.std(ber_values)
 
-                print(f"SNR={noise_db:6.2f} dB | " f"method={method:15s} | " f"BER={results[method]['ber'][i]:.6e}")
+                sample_snr_db = (
+                        float(noise_db) +
+                        10.0 * np.log10(self.bits_per_symbol / self.sps)
+                )
+                print(
+                    f"{self.config.noise_type.upper()}={noise_db:6.2f} dB | "
+                    f"sample SNR~{sample_snr_db:7.2f} dB | "
+                    f"method={method:15s} | "
+                    f"BER={results[method]['ber'][i]:.6e}"
+                )
 
         return results
 
@@ -144,25 +168,26 @@ class BerEvaluator:
 if __name__ == "__main__":
 
     dataset_cfg = DatasetConfig(
-        sample_rate=100000,
+        sample_rate=10000,
         symbol_time=1e-3,
         n_bits_to_transmit=100000,
 
         min_frequency_offset=-0,
         max_frequency_offset=0,
 
-        pulse_shape_type="rrc",
-        span_in_symbols=10,
+        pulse_shape_type="rect",
+        span_in_symbols=1,
         pulse_normalization="cpfsk",
 
         constellation_type="PAM",
         constellation_order=4,
 
-        noise_type="snr",
-        noise_db_values=list(np.arange(0, 20, 2)),
+        noise_type="eb_to_n0",
+        noise_db_values=list(np.arange(0, 22, 2)),
 
         n_signals_per_snr=3,
 
+        use_uw=False,
         uw_bits=[1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0],
     )
 
@@ -172,6 +197,7 @@ if __name__ == "__main__":
     evaluator_cfg = BerEvaluatorConfig(
         sample_rate=dataset_cfg.sample_rate,
         symbol_time=dataset_cfg.symbol_time,
+        frequency_sensitivity=dataset_cfg.h,
 
         pulse_shape_type=dataset_cfg.pulse_shape_type,
         span_in_symbols=dataset_cfg.span_in_symbols,

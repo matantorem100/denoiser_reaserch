@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 import sys
-from typing import Dict, Any
+from typing import Any
 
 import numpy as np
 
@@ -14,72 +14,47 @@ os.environ.setdefault("MPLCONFIGDIR", str(Path("/private/tmp") / "matplotlib-cac
 
 import matplotlib.pyplot as plt
 
+
 from demodulator_research.uw_detection.uw_detection import UwDetector
 from synthetic_dataset_creation.constellation.constellation import ConstellationConfig
+from synthetic_dataset_creation.dataset_creation import Dataset, DatasetConfig
 from synthetic_dataset_creation.modulator.modulator import Modulator, ModulatorConfig
-from synthetic_dataset_creation.pulse_shape.pulse_shape import PulseShapeConfig, PulseShape
-from synthetic_dataset_creation.coding.coding import Coding, CodingConfig
+from synthetic_dataset_creation.pulse_shape.pulse_shape import PulseShapeConfig
 
 
 @dataclass
-class UwCorrelationQualityConfig:
+class Config:
     sample_rate: float = 10_000
     symbol_time: float = 1e-3
-    frequency_sensitivity: float = 0.5
+    h: float = 0.5
 
     pulse_shape_type: str = "rrc"
-    span_in_symbols: int = 5
+    span_in_symbols: int = 10
     pulse_normalization: str = "cpfsk"
-
     constellation_type: str = "PAM"
     constellation_order: int = 4
 
-    n_payload_bits: int = 4000
-    leading_noise_samples: int = 0
-    uw_start_bit: int | None = None
-    n_trials_per_snr: int = 20
-    random_seed: int = 0
-
-    snr_db_values: tuple[float | None, ...] = (None, 20.0, 10.0, 5.0, 0.0)
-    frequency_offsets_hz: tuple[float, ...] = (0.0, 200.0)
+    n_bits: int = 2000
+    n_signals_per_condition: int = 1
+    snr_db_values: tuple[float, ...] = (0, 2, 4, 6, 8, 10)
+    frequency_offsets_hz: tuple[float, ...] = (-500, 0, 500)
 
     uw_bits: tuple[int, ...] = (
         1, 0, 0, 1, 0, 1, 1, 0, 0, 0,
         0, 0, 1, 1, 1, 0, 1, 1, 1, 0,
     )
+    uw_spacing_bits: int = 500
+    leading_noise_samples: int = 1000
 
-    plot_correlations: bool = True
-    max_lags_to_plot: int = 900
+    detection_threshold: float = 0.45
+    random_seed: int = 0
 
-
-def add_awgn_by_snr(
-        signal: np.ndarray,
-        snr_db: float,
-        rng: np.random.Generator,
-) -> np.ndarray:
-    signal = np.asarray(signal, dtype=np.complex128)
-    signal_power = np.mean(np.abs(signal) ** 2)
-    snr_linear = 10.0 ** (snr_db / 10.0)
-    noise_power = signal_power / snr_linear
-
-    noise = np.sqrt(noise_power / 2.0) * (
-            rng.standard_normal(signal.shape) + 1j * rng.standard_normal(signal.shape)
-    )
-
-    return signal + noise
+    n_context_symbols_before_crop: int = 6
+    n_context_symbols_after_crop: int = 6
+    n_random_context_trials: int = 200
 
 
-def apply_frequency_offset(
-        signal: np.ndarray,
-        frequency_offset_hz: float,
-        sample_rate: float,
-) -> np.ndarray:
-    signal = np.asarray(signal, dtype=np.complex128).reshape(-1)
-    n = np.arange(len(signal))
-    return signal * np.exp(1j * 2.0 * np.pi * frequency_offset_hz * n / sample_rate)
-
-
-def build_modulator(config: UwCorrelationQualityConfig) -> Modulator:
+def build_modulator(config: Config) -> Modulator:
     pulse_shape_config = PulseShapeConfig(
         pulse_shape_type=config.pulse_shape_type,
         normalization_type=config.pulse_normalization,
@@ -97,419 +72,264 @@ def build_modulator(config: UwCorrelationQualityConfig) -> Modulator:
     )
 
 
-def build_unmodulated_uw(
-        uw_bits: np.ndarray,
-        config: UwCorrelationQualityConfig,
-) -> np.ndarray:
-    pulse_shape_config = PulseShapeConfig(
-        pulse_shape_type=config.pulse_shape_type,
-        normalization_type=config.pulse_normalization,
-        span_in_symbols=config.span_in_symbols,
-    )
-    constellation_config = ConstellationConfig(
-        constellation_type=config.constellation_type,
-        constellation_order=config.constellation_order,
-    )
-
-    coding = Coding(CodingConfig(constellation=constellation_config))
-    constellation_points = np.arange(config.constellation_order) * 2 + 1 - config.constellation_order
-    symbols = coding.generate_bits_to_symbols(
-        bits_array=np.asarray(uw_bits, dtype=np.uint8),
-        constellation_points=constellation_points,
-    )
-
-    sps = int(round(config.sample_rate * config.symbol_time))
-    upsampled = np.zeros((len(symbols) - 1) * sps + 1, dtype=symbols.dtype)
-    upsampled[::sps] = symbols
-
-    pulse = PulseShape(pulse_shape_config).generate_pulse_shape(
-        sample_rate=config.sample_rate,
-        symbol_time=config.symbol_time,
-    )
-
-    return np.convolve(upsampled, pulse, mode="full")
+def build_cpfsk_uw(config: Config) -> np.ndarray:
+    return modulate_bits(config, np.asarray(config.uw_bits, dtype=np.uint8))
 
 
-def build_uw_references(
-        config: UwCorrelationQualityConfig,
-) -> dict[str, np.ndarray]:
-    uw_bits = np.asarray(config.uw_bits, dtype=np.uint8)
-    modulator = build_modulator(config)
-
-    cpfsk_uw, _ = modulator.modulate(
-        bits=np.array([], dtype=np.uint8),
+def modulate_bits(config: Config, bits: np.ndarray) -> np.ndarray:
+    signal, _ = build_modulator(config).modulate(
+        bits=bits,
         symbol_time=config.symbol_time,
         sample_rate=config.sample_rate,
-        uw=uw_bits,
         frequency_offset=0.0,
-        frequency_sensitivity=config.frequency_sensitivity,
+        frequency_sensitivity=config.h,
+        uw=None,
     )
-
-    return {
-        "cpfsk_uw": cpfsk_uw,
-        "unmodulated_uw": build_unmodulated_uw(
-            uw_bits=uw_bits,
-            config=config,
-        ),
-    }
+    return signal
 
 
-def generate_trial_signal(
-        config: UwCorrelationQualityConfig,
-        rng: np.random.Generator,
-        frequency_offset_hz: float,
-        snr_db: float | None,
-) -> dict[str, Any]:
+def create_dataset(config: Config) -> dict[tuple[float, float], dict[int, dict[str, Any]]]:
+    """
+    Create samples for every (SNR, CFO) condition.
+
+    Each condition contains signals with either:
+        n_uw = 0 -> noise only
+        n_uw = 3 -> noise prefix, UW, payload, UW, payload, UW
+
+    UWs are spaced by config.uw_spacing_bits.
+    """
+    rng = np.random.default_rng(config.random_seed)
+    dataset = {}
+
+    for snr_db in config.snr_db_values:
+        for frequency_offset_hz in config.frequency_offsets_hz:
+            dataset_config = DatasetConfig(
+                sample_rate=config.sample_rate,
+                symbol_time=config.symbol_time,
+                n_bits_to_transmit=config.n_bits,
+                const_frequency_offset=float(frequency_offset_hz),
+                min_phase_offset=0.0,
+                max_phase_offset=2.0 * np.pi,
+                const_phase_offset=None,
+                h=config.h,
+                pulse_shape_type=config.pulse_shape_type,
+                span_in_symbols=config.span_in_symbols,
+                pulse_normalization=config.pulse_normalization,
+                constellation_type=config.constellation_type,
+                constellation_order=config.constellation_order,
+                noise_type="snr",
+                noise_db_values=[float(snr_db)],
+                n_signals_per_snr=config.n_signals_per_condition,
+                uw_bits=list(config.uw_bits),
+                use_uw=True,
+                uw_probability=1.0,
+                n_uw_values=[3, 3],
+                uw_spacing_bits=config.uw_spacing_bits,
+                first_uw_after_noise=True,
+                leading_noise_samples=config.leading_noise_samples,
+                noise_only_when_no_uw=True,
+                random_uw_start=False,
+                uw_mode="overwrite",
+                random_seed=int(rng.integers(0, 2**31 - 1)),
+            )
+            dataset[(float(snr_db), float(frequency_offset_hz))] = Dataset(dataset_config).generate_dataset()[float(snr_db)]
+
+    return dataset
+
+
+def crop_stable_uw_middle(config: Config, cpfsk_uw: np.ndarray) -> tuple[np.ndarray, int, int]:
+    sps = int(round(config.sample_rate * config.symbol_time))
+    uw_length = len(cpfsk_uw)
+    uw_crop_start_sample = int(uw_length // 2 - sps * 3)
+    uw_crop_stop_sample = int(uw_length // 2 + sps * 3)
+
+    if uw_crop_start_sample < 0 or uw_crop_stop_sample > uw_length:
+        raise ValueError("UW middle crop is outside the clean UW signal")
+
+    return cpfsk_uw[uw_crop_start_sample:uw_crop_stop_sample], uw_crop_start_sample, uw_crop_stop_sample
+
+
+def crop_symbol_range(config: Config, cpfsk_uw: np.ndarray) -> tuple[int, int]:
+    sps = int(round(config.sample_rate * config.symbol_time))
     bits_per_symbol = int(np.log2(config.constellation_order))
-    n_payload_bits = (config.n_payload_bits // bits_per_symbol) * bits_per_symbol
-    payload_bits = rng.integers(0, 2, size=n_payload_bits, dtype=np.uint8)
-    uw_bits = np.asarray(config.uw_bits, dtype=np.uint8)
-    sps = int(round(config.sample_rate * config.symbol_time))
-    uw_start_sample = 0 if config.uw_start_bit is None else int((config.uw_start_bit // bits_per_symbol) * sps)
+    n_uw_symbols = len(config.uw_bits) // bits_per_symbol
+    _, uw_crop_start_sample, uw_crop_stop_sample = crop_stable_uw_middle(config, cpfsk_uw)
 
-    tx_signal, _ = build_modulator(config).modulate(
-        bits=payload_bits,
-        symbol_time=config.symbol_time,
-        sample_rate=config.sample_rate,
-        uw=uw_bits,
-        frequency_offset=0.0,
-        frequency_sensitivity=config.frequency_sensitivity,
-        uw_start_bit=config.uw_start_bit,
-        uw_mode="prepend" if config.uw_start_bit is None else "overwrite",
-    )
+    n_crop_symbols = (uw_crop_stop_sample - uw_crop_start_sample) // sps
+    crop_start_symbol = n_uw_symbols // 2 - n_crop_symbols // 2
+    crop_stop_symbol = crop_start_symbol + n_crop_symbols
 
-    rx_signal = apply_frequency_offset(
-        signal=tx_signal,
-        frequency_offset_hz=frequency_offset_hz,
-        sample_rate=config.sample_rate,
-    )
+    if crop_start_symbol < 0 or crop_stop_symbol > n_uw_symbols:
+        raise ValueError("UW crop does not fit inside the UW symbols")
 
-    if config.leading_noise_samples > 0:
-        leading_noise = (
-                rng.standard_normal(config.leading_noise_samples) +
-                1j * rng.standard_normal(config.leading_noise_samples)
-        ) / np.sqrt(2.0)
-        rx_signal = np.concatenate((leading_noise, rx_signal))
-
-    if snr_db is not None:
-        rx_signal = add_awgn_by_snr(
-            signal=rx_signal,
-            snr_db=snr_db,
-            rng=rng,
-        )
-
-    return {
-        "rx_signal": rx_signal,
-        "true_uw_start_sample": config.leading_noise_samples + uw_start_sample,
-    }
+    return crop_start_symbol, crop_stop_symbol
 
 
-def expected_correlation_index(
-        method_name: str,
-        config: UwCorrelationQualityConfig,
-        references: dict[str, np.ndarray],
-        true_uw_start_sample: int | None = None,
-) -> int:
-    if method_name == "complex_correlation":
-        reference_length = len(references["cpfsk_uw"])
-    elif method_name == "regular_correlation":
-        reference_length = len(references["unmodulated_uw"]) - 1
-    elif method_name == "differential_correlation":
-        lag = int(round(config.sample_rate * config.symbol_time))
-        reference_length = len(references["cpfsk_uw"]) - lag
-    else:
-        raise NotImplementedError
-
-    # UwDetector.normalized_correlation currently uses full convolution.
-    if true_uw_start_sample is None:
-        bits_per_symbol = int(np.log2(config.constellation_order))
-        sps = int(round(config.sample_rate * config.symbol_time))
-        uw_start_sample = 0 if config.uw_start_bit is None else int((config.uw_start_bit // bits_per_symbol) * sps)
-        true_uw_start_sample = config.leading_noise_samples + uw_start_sample
-
-    return int(true_uw_start_sample) + reference_length - 1
-
-
-def largest_false_peak(
-        correlation: np.ndarray,
-        true_peak_index: int,
-        guard_samples: int,
-) -> float:
-    mask = np.ones(len(correlation), dtype=bool)
-    start = max(0, true_peak_index - guard_samples)
-    stop = min(len(correlation), true_peak_index + guard_samples + 1)
-    mask[start:stop] = False
-
-    if not np.any(mask):
-        return float("nan")
-
-    return float(np.nanmax(correlation[mask]))
-
-
-def summarize_correlation(
-        correlation: np.ndarray,
-        expected_index: int,
-        guard_samples: int,
-) -> dict[str, float]:
-    correlation = np.asarray(correlation, dtype=float).reshape(-1)
-    max_peak_index = int(np.nanargmax(correlation))
-    max_peak = float(correlation[max_peak_index])
-
-    true_peak = float(correlation[expected_index]) if 0 <= expected_index < len(correlation) else float("nan")
-    false_peak = largest_false_peak(
-        correlation=correlation,
-        true_peak_index=expected_index,
-        guard_samples=guard_samples,
-    )
-
-    return {
-        "true_peak": true_peak,
-        "max_peak": max_peak,
-        "largest_false_peak": false_peak,
-        "peak_margin": true_peak - false_peak,
-        "max_peak_index": float(max_peak_index),
-        "peak_index_error": float(max_peak_index - expected_index),
-    }
-
-
-def run_detectors(
+def random_context_middle_correlation(
         rx_signal: np.ndarray,
-        references: dict[str, np.ndarray],
-        config: UwCorrelationQualityConfig,
+        config: Config,
+        cpfsk_uw: np.ndarray,
+        rng: np.random.Generator,
+) -> np.ndarray:
+    sps = int(round(config.sample_rate * config.symbol_time))
+    bits_per_symbol = int(np.log2(config.constellation_order))
+    uw_bits = np.asarray(config.uw_bits, dtype=np.uint8)
+    _, uw_crop_start_sample, uw_crop_stop_sample = crop_stable_uw_middle(config, cpfsk_uw)
+
+    crop_start_symbol, crop_stop_symbol = crop_symbol_range(config, cpfsk_uw)
+    crop_start_bit = crop_start_symbol * bits_per_symbol
+    crop_stop_bit = crop_stop_symbol * bits_per_symbol
+    fixed_crop_bits = uw_bits[crop_start_bit:crop_stop_bit]
+
+    crop_start_offset_samples = uw_crop_start_sample - crop_start_symbol * sps
+    reference_crop_start = config.n_context_symbols_before_crop * sps + crop_start_offset_samples
+    reference_crop_len = uw_crop_stop_sample - uw_crop_start_sample
+
+    best_score = -np.inf
+    best_correlation = None
+
+    for _ in range(config.n_random_context_trials):
+        before_bits = rng.integers(
+            0,
+            2,
+            size=config.n_context_symbols_before_crop * bits_per_symbol,
+            dtype=np.uint8,
+        )
+        after_bits = rng.integers(
+            0,
+            2,
+            size=config.n_context_symbols_after_crop * bits_per_symbol,
+            dtype=np.uint8,
+        )
+        reference_bits = np.concatenate((before_bits, fixed_crop_bits, after_bits))
+        reference_signal = modulate_bits(config, reference_bits)
+        reference_middle = reference_signal[reference_crop_start:reference_crop_start + reference_crop_len]
+
+        correlation = UwDetector(
+            "differential_correlation",
+            differential_lag_samples=sps,
+        ).estimate(rx_signal, reference_middle)
+        score = float(np.max(correlation))
+
+        if score > best_score:
+            best_score = score
+            best_correlation = correlation
+
+    return best_correlation
+
+
+def run_all_correlation_methods(
+        rx_signal: np.ndarray,
+        config: Config,
+        cpfsk_uw: np.ndarray,
+        rng: np.random.Generator,
 ) -> dict[str, np.ndarray]:
+    """
+    Run every UW detector correlation method.
+    """
+    sps = int(round(config.sample_rate * config.symbol_time))
+    cpfsk_uw_middle, _, _ = crop_stable_uw_middle(config, cpfsk_uw)
+
     return {
-        "complex_correlation": UwDetector("complex_correlation").estimate(
-            signal=rx_signal,
-            cpfsk_uw=references["cpfsk_uw"],
-        ),
-        "regular_correlation": UwDetector("regular_correlation").estimate(
-            signal=rx_signal,
-            cpfsk_uw=references["cpfsk_uw"],
-        ),
+        "complex_correlation": UwDetector("complex_correlation").estimate(rx_signal, cpfsk_uw),
+        "regular_correlation": UwDetector("regular_correlation").estimate(rx_signal, cpfsk_uw),
         "differential_correlation": UwDetector(
             "differential_correlation",
-            differential_lag_samples=int(round(config.sample_rate * config.symbol_time)),
-        ).estimate(
-            signal=rx_signal,
-            cpfsk_uw=references["cpfsk_uw"],
+            differential_lag_samples=sps,
+        ).estimate(rx_signal, cpfsk_uw),
+        "middle_differential_correlation": UwDetector(
+            "differential_correlation",
+            differential_lag_samples=sps,
+        ).estimate(rx_signal, cpfsk_uw_middle),
+        "random_context_middle_differential_correlation": random_context_middle_correlation(
+            rx_signal=rx_signal,
+            config=config,
+            cpfsk_uw=cpfsk_uw,
+            rng=rng,
         ),
     }
 
 
-def evaluate_uw_detection_quality(
-        config: UwCorrelationQualityConfig,
-) -> dict:
-    rng = np.random.default_rng(config.random_seed)
-    references = build_uw_references(config)
-    methods = [
-        "complex_correlation",
-        "regular_correlation",
-        "differential_correlation",
-    ]
-    metrics = [
-        "true_peak",
-        "max_peak",
-        "largest_false_peak",
-        "peak_margin",
-        "max_peak_index",
-        "peak_index_error",
-    ]
+def true_peak_offset(method: str, config: Config, cpfsk_uw: np.ndarray) -> int:
+    sps = int(round(config.sample_rate * config.symbol_time))
 
-    guard_samples = int(round(config.sample_rate * config.symbol_time))
-    results: dict[float, dict[float | None, dict[str, dict[str, float]]]] = {}
-    example_correlations: dict[tuple[float, float | None], dict[str, np.ndarray]] = {}
+    if method == "complex_correlation":
+        return len(cpfsk_uw) - 1
+    if method == "regular_correlation":
+        return len(cpfsk_uw) - 2
+    if method == "differential_correlation":
+        return len(cpfsk_uw) - sps - 1
+    if method == "middle_differential_correlation":
+        cpfsk_uw_middle, uw_crop_start_sample, _ = crop_stable_uw_middle(config, cpfsk_uw)
+        return uw_crop_start_sample + len(cpfsk_uw_middle) - sps - 1
+    if method == "random_context_middle_differential_correlation":
+        cpfsk_uw_middle, uw_crop_start_sample, _ = crop_stable_uw_middle(config, cpfsk_uw)
+        return uw_crop_start_sample + len(cpfsk_uw_middle) - sps - 1
 
-    for frequency_offset_hz in config.frequency_offsets_hz:
-        results[frequency_offset_hz] = {}
-
-        for snr_db in config.snr_db_values:
-            per_method_trials = {
-                method_name: {metric: [] for metric in metrics}
-                for method_name in methods
-            }
-
-            for trial_index in range(config.n_trials_per_snr):
-                trial = generate_trial_signal(
-                    config=config,
-                    rng=rng,
-                    frequency_offset_hz=frequency_offset_hz,
-                    snr_db=snr_db,
-                )
-
-                correlations = run_detectors(
-                    rx_signal=trial["rx_signal"],
-                    references=references,
-                    config=config,
-                )
-
-                if trial_index == 0:
-                    example_correlations[(frequency_offset_hz, snr_db)] = correlations
-
-                for method_name, correlation in correlations.items():
-                    expected_index = expected_correlation_index(
-                        method_name=method_name,
-                        config=config,
-                        references=references,
-                        true_uw_start_sample=trial["true_uw_start_sample"],
-                    )
-                    summary = summarize_correlation(
-                        correlation=correlation,
-                        expected_index=expected_index,
-                        guard_samples=guard_samples,
-                    )
-
-                    for metric in metrics:
-                        per_method_trials[method_name][metric].append(summary[metric])
-
-            results[frequency_offset_hz][snr_db] = {
-                method_name: {
-                    metric: float(np.nanmean(per_method_trials[method_name][metric]))
-                    for metric in metrics
-                }
-                for method_name in methods
-            }
-
-            print_summary_for_condition(
-                frequency_offset_hz=frequency_offset_hz,
-                snr_db=snr_db,
-                condition_results=results[frequency_offset_hz][snr_db],
-            )
-
-    return {
-        "results": results,
-        "example_correlations": example_correlations,
-        "references": references,
-    }
+    raise ValueError(f"Unknown method: {method}")
 
 
-def snr_label(snr_db: float | None) -> str:
-    return "clean" if snr_db is None else f"{snr_db:g} dB"
-
-
-def print_summary_for_condition(
-        frequency_offset_hz: float,
-        snr_db: float | None,
-        condition_results: dict[str, dict[str, float]],
+def plot_correlations_and_uw_positions(
+        config: Config,
+        sample: dict[str, Any],
+        correlations: dict[str, np.ndarray],
+        cpfsk_uw: np.ndarray,
+        title: str = "",
 ) -> None:
-    print()
-    print("=" * 118)
-    print(f"CFO = {frequency_offset_hz:g} Hz | SNR = {snr_label(snr_db)}")
-    print("=" * 118)
-    print(
-        f"{'method':<26} | "
-        f"{'true peak':>10} | "
-        f"{'max peak':>10} | "
-        f"{'false peak':>10} | "
-        f"{'margin':>10} | "
-        f"{'idx error':>10}"
-    )
-    print("-" * 118)
+    """
+    Plot all correlations and draw dashed vertical lines at the true UW peaks.
+    """
+    fig, axes = plt.subplots(len(correlations), 1, figsize=(12, 2.8 * len(correlations)), constrained_layout=True)
+    if len(correlations) == 1:
+        axes = [axes]
 
-    for method_name, method_result in condition_results.items():
-        print(
-            f"{method_name:<26} | "
-            f"{method_result['true_peak']:>10.4f} | "
-            f"{method_result['max_peak']:>10.4f} | "
-            f"{method_result['largest_false_peak']:>10.4f} | "
-            f"{method_result['peak_margin']:>10.4f} | "
-            f"{method_result['peak_index_error']:>10.1f}"
-        )
-
-
-def plot_example_correlations(
-        config: UwCorrelationQualityConfig,
-        example_correlations: dict[tuple[float, float | None], dict[str, np.ndarray]],
-        references: dict[str, np.ndarray],
-) -> None:
-    if not config.plot_correlations:
-        return
-
-    for (frequency_offset_hz, snr_db), correlations in example_correlations.items():
-        for method_name, correlation in correlations.items():
-            plt.figure(figsize=(11, 5))
-
-            stop = min(config.max_lags_to_plot, len(correlation))
-            plt.plot(
-                np.arange(stop),
-                correlation[:stop],
-                label=method_name,
-            )
-
-            expected_index = expected_correlation_index(
-                method_name=method_name,
-                config=config,
-                references=references,
-            )
-            if expected_index < config.max_lags_to_plot:
-                plt.axvline(expected_index, linestyle="--", label="expected UW peak")
-
-            plt.grid(True)
-            plt.xlabel("Correlation index")
-            plt.ylabel("Normalized correlation magnitude")
-            plt.title(
-                f"{method_name} | "
-                f"CFO={frequency_offset_hz:g} Hz | "
-                f"SNR={snr_label(snr_db)}"
-            )
-            plt.legend()
-            plt.tight_layout()
-            plt.show()
-
-
-def plot_metric_vs_snr(
-        config: UwCorrelationQualityConfig,
-        results: dict,
-        metric: str,
-) -> None:
-    for frequency_offset_hz, results_for_cfo in results.items():
-        plt.figure(figsize=(9, 5))
-
-        x_values = [
-            100.0 if snr_db is None else float(snr_db)
-            for snr_db in config.snr_db_values
+    for axis, (method, correlation) in zip(axes, correlations.items()):
+        true_peaks = [
+            start + true_peak_offset(method, config, cpfsk_uw)
+            for start in sample["uw_start_samples"]
         ]
 
-        for method_name in next(iter(results_for_cfo.values())).keys():
-            y_values = [
-                results_for_cfo[snr_db][method_name][metric]
-                for snr_db in config.snr_db_values
-            ]
-            plt.plot(x_values, y_values, marker="o", label=method_name)
+        axis.plot(correlation, label=method)
 
-        plt.grid(True)
-        plt.xlabel("SNR [dB] (clean shown as 100 dB)")
-        plt.ylabel(metric)
-        plt.title(f"{metric} vs SNR | CFO={frequency_offset_hz:g} Hz")
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
+        for peak in true_peaks:
+            axis.axvline(peak, color="tab:green", linestyle="--", linewidth=1.5, label="true UW")
+        axis.axhline(config.detection_threshold, color="black", linestyle=":", linewidth=1.0, label="threshold")
+
+        axis.set_title(method)
+        axis.set_ylabel("corr")
+        axis.grid(True)
+        handles, labels = axis.get_legend_handles_labels()
+        axis.legend(dict(zip(labels, handles)).values(), dict(zip(labels, handles)).keys(), loc="upper right")
+
+    axes[-1].set_xlabel("correlation index")
+    fig.suptitle(title)
+    plt.show()
 
 
 if __name__ == "__main__":
-    config = UwCorrelationQualityConfig(
-        snr_db_values=(10.0, 5),
-        frequency_offsets_hz=(50, 30),
-        n_trials_per_snr=5,
-        uw_start_bit=1000,
-        max_lags_to_plot=7000,
+    config = Config()
+    dataset = create_dataset(config)
+    cpfsk_uw = build_cpfsk_uw(config)
+    cpfsk_uw_middle, uw_crop_start_sample, uw_crop_stop_sample = crop_stable_uw_middle(config, cpfsk_uw)
+    print(
+        f"middle UW crop: start={uw_crop_start_sample}, stop={uw_crop_stop_sample}, "
+        f"length={len(cpfsk_uw_middle)} samples"
     )
 
-    output = evaluate_uw_detection_quality(config)
-
-    plot_example_correlations(
-        config=config,
-        example_correlations=output["example_correlations"],
-        references=output["references"],
-    )
-
-    plot_metric_vs_snr(
-        config=config,
-        results=output["results"],
-        metric="peak_margin",
-    )
-
-    plot_metric_vs_snr(
-        config=config,
-        results=output["results"],
-        metric="largest_false_peak",
-    )
+    rng = np.random.default_rng(config.random_seed)
+    for (snr_db, frequency_offset_hz), samples in dataset.items():
+        sample_index = int(rng.choice(list(samples.keys())))
+        sample = samples[sample_index]
+        correlations = run_all_correlation_methods(
+            rx_signal=sample["rx_signal"],
+            config=config,
+            cpfsk_uw=cpfsk_uw,
+            rng=rng,
+        )
+        plot_correlations_and_uw_positions(
+            config=config,
+            sample=sample,
+            correlations=correlations,
+            cpfsk_uw=cpfsk_uw,
+            title=f"SNR={snr_db:g} dB | CFO={frequency_offset_hz:g} Hz | n_uw={sample['n_uw']}",
+        )

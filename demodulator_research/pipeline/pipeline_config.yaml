@@ -1,0 +1,62 @@
+defaults:
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+  - _self_
+
+dataset:
+  sample_rate: 10000
+  symbol_time: 0.001
+  n_bits_to_transmit: 2000
+
+  min_frequency_offset: -500.0
+  max_frequency_offset: 500.0
+  const_frequency_offset: null
+
+  min_phase_offset: 0.0
+  max_phase_offset: 6.283185307179586
+  const_phase_offset: null
+
+  h: 0.5
+  pulse_shape_type: rrc
+  span_in_symbols: 5
+  pulse_normalization: cpfsk
+
+  constellation_type: PAM
+  constellation_order: 4
+
+  noise_type: snr
+  noise_db_values: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+  n_signals_per_snr: 100
+
+  uw_bits: [1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0]
+  use_uw: true
+  uw_probability: 1.0
+  n_uw_values: [0, 1, 2, 3]
+  uw_spacing_bits: 500
+  first_uw_after_noise: true
+  leading_noise_samples: 1000
+  noise_only_when_no_uw: true
+  random_uw_start: false
+  uw_mode: overwrite
+
+  random_seed: 0
+
+receiver:
+  uw_detection_threshold: 0.4
+  grid_spacing_tolerance: 2
+  pll_tail_fraction: 0.2
+
+plots:
+  summary: true
+  correlations: false
+  max_correlation_examples: 6
+  remaining_offsets: true
+  pll_examples: true
+  max_pll_examples: 3
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false
