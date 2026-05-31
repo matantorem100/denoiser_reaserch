@@ -34,7 +34,7 @@ class Channel:
             if n_symbols == 0:
                 return 0.0
 
-            # Symbol energy
+            # Symbol energy * sample_rate i didn't divide the energy by the sample rate
             es = np.sum(np.abs(signal) ** 2) / n_symbols
 
             # Bit energy
@@ -42,6 +42,9 @@ class Channel:
 
             eb_n0_linear = 10 ** (self.config.noise_db / 10.0)
             n0 = eb / eb_n0_linear
+
+            # the power is n0 * B. we assume that B = sample_rate -> to get the real result we need to filter very
+            # good in the receiver
 
             return float(n0)
 
