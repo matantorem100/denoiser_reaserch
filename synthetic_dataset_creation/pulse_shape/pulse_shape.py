@@ -6,6 +6,7 @@ class PulseShapeConfig(pydantic.BaseModel):
     normalization_type: str
     rolloff: float = 0.25
     span_in_symbols: int = 1
+    pulse_causal: bool = False
 
 class PulseShape:
     def __init__(self, config: PulseShapeConfig):
