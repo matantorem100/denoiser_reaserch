@@ -27,6 +27,7 @@ class DatasetConfig(pydantic.BaseModel):
     pulse_shape_type: str = "rect"
     span_in_symbols: int = 1
     pulse_normalization: str = "cpfsk"
+    pulse_causal: bool = False
 
     constellation_type: str = "PAM"
     constellation_order: int = 4
@@ -94,7 +95,8 @@ class Dataset:
 
         pulse_shape_config = PulseShapeConfig(pulse_shape_type=self.config.pulse_shape_type,
                                               normalization_type=self.config.pulse_normalization,
-                                              span_in_symbols=self.config.span_in_symbols)
+                                              span_in_symbols=self.config.span_in_symbols,
+                                              pulse_causal=self.config.pulse_causal)
 
         constellation_config = ConstellationConfig(constellation_type=self.config.constellation_type,
                                                    constellation_order=self.config.constellation_order)
