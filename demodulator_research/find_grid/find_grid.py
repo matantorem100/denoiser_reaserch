@@ -45,13 +45,19 @@ def _nearest_unused_peak(peaks: np.ndarray, peak_values: np.ndarray, expected_po
 
 
 def find_best_uw_grid(correlation: np.ndarray, uw_spacing: int, threshold: float = 0.45, n_uw: int | None = None,
-                      spacing_tolerance: int = 2, min_peak_distance: int | None = None, min_n_uw: int = 1) -> GridSearchResult:
+                      spacing_tolerance: int = 2, min_peak_distance: int | None = None, min_n_uw: int = 1,
+                      first_peak_weight: float = 1.0) -> GridSearchResult:
     """
     Find UW positions from a correlation vector.
 
     Returns positions in correlation-index units. If the correlation was produced
     by full convolution, convert these indices to true signal starts outside this
     function using the detector-specific offset.
+
+    first_peak_weight:
+        Extra score multiplier for the first peak in each candidate grid.
+        Use 1.0 for normal sum scoring. Use values > 1.0 when the first UW is
+        expected to be cleaner/more reliable than later UWs.
     """
     correlation = np.asarray(correlation, dtype=float).reshape(-1)
 
@@ -69,7 +75,7 @@ def find_best_uw_grid(correlation: np.ndarray, uw_spacing: int, threshold: float
             uw_positions=[int(peaks[best_peak_index])],
             peak_positions=[int(peaks[best_peak_index])],
             peak_values=[float(peak_values[best_peak_index])],
-            score=float(peak_values[best_peak_index]),
+            score=float(max(first_peak_weight, 1.0) * peak_values[best_peak_index]),
         )
 
     best_positions: list[int] = []
@@ -111,6 +117,8 @@ def find_best_uw_grid(correlation: np.ndarray, uw_spacing: int, threshold: float
             continue
 
         score = float(np.sum(grid_values))
+        if grid_values:
+            score += float(max(first_peak_weight, 1.0) - 1.0) * float(grid_values[0])
         if len(grid_positions) > 1:
             score += 0.1 * len(grid_positions)
 
@@ -131,7 +139,7 @@ def find_best_uw_grid(correlation: np.ndarray, uw_spacing: int, threshold: float
 
 
 def find_uw_positions(correlation: np.ndarray, uw_spacing: int, threshold: float = 0.45, n_uw: int | None = None,
-                      spacing_tolerance: int = 2) -> list[int]:
+                      spacing_tolerance: int = 2, first_peak_weight: float = 1.0) -> list[int]:
 
     result = find_best_uw_grid(
         correlation=correlation,
@@ -139,5 +147,6 @@ def find_uw_positions(correlation: np.ndarray, uw_spacing: int, threshold: float
         threshold=threshold,
         n_uw=n_uw,
         spacing_tolerance=spacing_tolerance,
+        first_peak_weight=first_peak_weight,
     )
     return result.uw_positions
