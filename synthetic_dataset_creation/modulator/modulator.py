@@ -199,7 +199,7 @@ class Modulator:
         upsampled_symbols[::sps] = symbols
 
         pulse_shape = self._pulse_shape_instance.generate_pulse_shape(sample_rate, symbol_time)
-        modulated_signal = np.convolve(upsampled_symbols, pulse_shape, mode="full")
+        modulated_signal = np.convolve(upsampled_symbols, pulse_shape, mode="same")
 
         modulated_signal = self._fm_modulate_baseband(
             message=modulated_signal,
