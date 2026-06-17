@@ -58,6 +58,10 @@ def find_best_uw_grid(correlation: np.ndarray, uw_spacing: int, threshold: float
         Extra score multiplier for the first peak in each candidate grid.
         Use 1.0 for normal sum scoring. Use values > 1.0 when the first UW is
         expected to be cleaner/more reliable than later UWs.
+
+    Missing peaks inside a grid are allowed. For example, with spacing 1000,
+    peaks at 1000, 3000, 4000, 5000 are treated as one grid with a missing
+    2000 slot instead of only accepting the consecutive 3000, 4000, 5000 run.
     """
     correlation = np.asarray(correlation, dtype=float).reshape(-1)
 
@@ -101,10 +105,7 @@ def find_best_uw_grid(correlation: np.ndarray, uw_spacing: int, threshold: float
                 used_peak_indices=used_peak_indices,
             )
             if matched_peak is None:
-                if n_uw is not None:
-                    grid_positions = []
-                    grid_values = []
-                break
+                continue
 
             peak_index, peak_position, peak_value = matched_peak
             used_peak_indices.add(peak_index)
@@ -112,8 +113,6 @@ def find_best_uw_grid(correlation: np.ndarray, uw_spacing: int, threshold: float
             grid_values.append(peak_value)
 
         if len(grid_positions) < min_n_uw:
-            continue
-        if n_uw is not None and len(grid_positions) != n_uw:
             continue
 
         score = float(np.sum(grid_values))
@@ -136,17 +135,3 @@ def find_best_uw_grid(correlation: np.ndarray, uw_spacing: int, threshold: float
         peak_values=best_values,
         score=float(best_score),
     )
-
-
-def find_uw_positions(correlation: np.ndarray, uw_spacing: int, threshold: float = 0.45, n_uw: int | None = None,
-                      spacing_tolerance: int = 2, first_peak_weight: float = 1.0) -> list[int]:
-
-    result = find_best_uw_grid(
-        correlation=correlation,
-        uw_spacing=uw_spacing,
-        threshold=threshold,
-        n_uw=n_uw,
-        spacing_tolerance=spacing_tolerance,
-        first_peak_weight=first_peak_weight,
-    )
-    return result.uw_positions

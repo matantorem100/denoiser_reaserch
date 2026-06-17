@@ -5,6 +5,52 @@ import numpy as np
 from synthetic_dataset_creation.dataset_creation import Dataset, DatasetConfig
 
 
+def fractional_delay_filter(delay_samples: float, num_taps: int = 81) -> np.ndarray:
+    """Windowed-sinc FIR that approximates x[n - delay_samples]."""
+    num_taps = int(num_taps)
+    if num_taps < 3:
+        raise ValueError("num_taps must be at least 3")
+    if num_taps % 2 == 0:
+        num_taps += 1
+
+    n = np.arange(num_taps, dtype=np.float64)
+    center = (num_taps - 1) / 2.0
+    taps = np.sinc(n - center - float(delay_samples))
+    taps *= np.hamming(num_taps)
+    taps_sum = np.sum(taps)
+    if np.isclose(taps_sum, 0.0):
+        raise ValueError("fractional delay filter has near-zero DC gain")
+    return taps / taps_sum
+
+
+def apply_timing_offset(signal: np.ndarray, delay_samples: float, num_taps: int = 81) -> np.ndarray:
+    """
+    Apply a constant timing offset using a fractional-delay interpolation filter.
+
+    Positive delay_samples approximates y[n] = x[n - delay_samples], so the
+    waveform appears later in the sample grid.
+    """
+    signal = np.asarray(signal, dtype=np.complex128).reshape(-1)
+    if len(signal) == 0 or np.isclose(float(delay_samples), 0.0):
+        return signal.copy()
+
+    taps = fractional_delay_filter(delay_samples=float(delay_samples), num_taps=int(num_taps))
+    real = np.convolve(np.real(signal), taps, mode="same")
+    imag = np.convolve(np.imag(signal), taps, mode="same")
+    return real + 1j * imag
+
+
+def choose_timing_offset_symbols(params: dict[str, Any], rng: np.random.Generator, has_signal: bool) -> float:
+    if not bool(params.get("simulate_timing_offset", False)) or not has_signal:
+        return 0.0
+    if "timing_offset_symbols" in params:
+        return float(params["timing_offset_symbols"])
+    return float(rng.uniform(
+        float(params.get("min_timing_offset_symbols", 0.0)),
+        float(params.get("max_timing_offset_symbols", 0.0)),
+    ))
+
+
 def build_pipeline_test_dataset(params: dict[str, Any]) -> dict[float, dict[int, dict[str, Any]]]:
     """
     Build a dataset for testing the receiver pipeline.
@@ -80,6 +126,7 @@ def build_pipeline_test_dataset(params: dict[str, Any]) -> dict[float, dict[int,
 
     n_signal_symbols = int((total_signal_samples - leading_noise_samples) // sps)
     n_bits_to_transmit = n_signal_symbols * bits_per_symbol
+    timing_offset_filter_taps = int(params.get("timing_offset_filter_taps", 81))
 
     dataset: dict[float, dict[int, dict[str, Any]]] = {}
 
@@ -93,6 +140,8 @@ def build_pipeline_test_dataset(params: dict[str, Any]) -> dict[float, dict[int,
 
             frequency_offset_hz = float(rng.uniform(float(params["min_frequency_offset_hz"]), float(params["max_frequency_offset_hz"])))
             phase_offset_rad = float(rng.uniform(float(params["min_phase_offset_rad"]), float(params["max_phase_offset_rad"])))
+            timing_offset_symbols = choose_timing_offset_symbols(params=params, rng=rng, has_signal=has_signal)
+            timing_offset_samples = float(timing_offset_symbols) * float(sps)
 
             dataset_config = DatasetConfig(
                 sample_rate=sample_rate,
@@ -110,14 +159,14 @@ def build_pipeline_test_dataset(params: dict[str, Any]) -> dict[float, dict[int,
                 noise_type=str(params["noise_type"]),
                 noise_db_values=[snr_db],
                 n_signals_per_snr=1,
-                use_uw=True,
-                uw_probability=1.0,
+                use_uw=bool(params.get("use_uw", True)),
+                uw_probability=float(params.get("uw_probability", 1.0)),
                 n_uw_values=[n_uw],
                 uw_bits=list(params["uw_bits"]),
                 uw_spacing_bits=uw_spacing_bits,
                 first_uw_after_noise=True,
                 leading_noise_samples=leading_noise_samples,
-                noise_only_when_no_uw=True,
+                noise_only_when_no_uw=bool(params.get("noise_only_when_no_uw", True)),
                 random_uw_start=False,
                 uw_mode="overwrite",
                 random_seed=int(rng.integers(0, 2**31 - 1)),
@@ -129,12 +178,24 @@ def build_pipeline_test_dataset(params: dict[str, Any]) -> dict[float, dict[int,
             # noise before the signal, and convolution can make the signal a few
             # samples longer than the nominal symbol count.
             rx_signal = np.asarray(sample["rx_signal"], dtype=np.complex128)
+            if has_signal and not np.isclose(timing_offset_samples, 0.0):
+                rx_signal = apply_timing_offset(
+                    signal=rx_signal,
+                    delay_samples=timing_offset_samples,
+                    num_taps=timing_offset_filter_taps,
+                )
             if len(rx_signal) >= total_signal_samples:
                 sample["rx_signal"] = rx_signal[:total_signal_samples]
             else:
                 sample["rx_signal"] = np.pad(rx_signal, (0, total_signal_samples - len(rx_signal)))
 
             channel_noise = np.asarray(sample["channel_noise"], dtype=np.complex128)
+            if has_signal and not np.isclose(timing_offset_samples, 0.0):
+                channel_noise = apply_timing_offset(
+                    signal=channel_noise,
+                    delay_samples=timing_offset_samples,
+                    num_taps=timing_offset_filter_taps,
+                )
             if len(channel_noise) >= total_signal_samples:
                 sample["channel_noise"] = channel_noise[:total_signal_samples]
             else:
@@ -147,6 +208,8 @@ def build_pipeline_test_dataset(params: dict[str, Any]) -> dict[float, dict[int,
             sample["uw_spacing_samples"] = int(uw_spacing_samples)
             sample["uw_spacing_bits"] = int(uw_spacing_bits)
             sample["has_signal"] = bool(has_signal)
+            sample["timing_offset_symbols"] = float(timing_offset_symbols)
+            sample["timing_offset_samples"] = float(timing_offset_samples)
 
             dataset[snr_db][sample_index] = sample
 

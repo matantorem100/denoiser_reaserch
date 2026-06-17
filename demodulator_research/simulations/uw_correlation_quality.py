@@ -123,7 +123,7 @@ def create_dataset(config: Config) -> dict[tuple[float, float], dict[int, dict[s
                 uw_bits=list(config.uw_bits),
                 use_uw=True,
                 uw_probability=1.0,
-                n_uw_values=[3, 3],
+                n_uw_values=[0, 3],
                 uw_spacing_bits=config.uw_spacing_bits,
                 first_uw_after_noise=True,
                 leading_noise_samples=config.leading_noise_samples,

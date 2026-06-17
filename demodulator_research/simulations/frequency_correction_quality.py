@@ -463,8 +463,8 @@ if __name__ == "__main__":
         max_frequency_offset=0,
         const_frequency_offset=const_frequency_offset,
 
-        pulse_shape_type="rect",
-        span_in_symbols=1,
+        pulse_shape_type="rrc",
+        span_in_symbols=10,
         pulse_normalization="cpfsk",
 
         constellation_type="PAM",
@@ -474,7 +474,7 @@ if __name__ == "__main__":
         noise_db_values=list(np.arange(-10, 22, 2)),
 
         # Increase this for smoother curves.
-        n_signals_per_snr=20,
+        n_signals_per_snr=1,
 
         uw_bits=uw_bits,
     )
