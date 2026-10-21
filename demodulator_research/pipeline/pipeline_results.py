@@ -162,6 +162,10 @@ def wrap_phase_rad(phase_rad: float) -> float:
     return float(np.angle(np.exp(1j * float(phase_rad))))
 
 
+def wrap_fractional_sample_error(error_samples: float) -> float:
+    return float((float(error_samples) + 0.5) % 1.0 - 0.5)
+
+
 def count_matched_uw_starts(detected_starts: list[int], true_starts: list[int], tolerance_samples: int) -> int:
     unused_true_starts = list(map(int, true_starts))
     n_matches = 0
@@ -179,6 +183,10 @@ def count_matched_uw_starts(detected_starts: list[int], true_starts: list[int], 
 def format_timing(timing_sec: dict[str, float]) -> str:
     return (
         f"det={timing_sec['detection']:.3f}s "
+        f"timing_est={timing_sec['timing_estimation']:.3f}s "
+        f"timing_corr={timing_sec['timing_correction']:.3f}s "
+        f"freq={timing_sec['frequency_estimation']:.3f}s "
+        f"phase={timing_sec['phase_estimation']:.3f}s "
         f"vit={timing_sec['demodulation']:.3f}s "
         f"diff={timing_sec['differential_demodulation']:.3f}s "
         f"total={timing_sec['total']:.3f}s"
@@ -222,6 +230,10 @@ def evaluate_pipeline(dataset: dict[float, dict[int, dict[str, Any]]], params: d
         n_bad_grid = 0
         remaining_detection_complex_phase_rad = []
         remaining_correlation_peak_frequency_offset_hz = []
+        remaining_timing_offset_samples = []
+        remaining_timing_offset_symbols = []
+        remaining_parabolic_timing_offset_samples = []
+        max_differential_correlation_values = []
         viterbi_ber_values = []
         differential_ber_values = []
         viterbi_nonzero_ber_samples = []
@@ -231,6 +243,10 @@ def evaluate_pipeline(dataset: dict[float, dict[int, dict[str, Any]]], params: d
         demod_times_sec = []
         timing_values = {
             "detection": [],
+            "timing_estimation": [],
+            "timing_correction": [],
+            "frequency_estimation": [],
+            "phase_estimation": [],
             "demodulation": [],
             "differential_demodulation": [],
             "total": [],
@@ -280,6 +296,27 @@ def evaluate_pipeline(dataset: dict[float, dict[int, dict[str, Any]]], params: d
             remaining_correlation_peak_frequency_offset_hz.append(
                 float(sample["frequency_offset"]) - float(frequency_estimation["frequency_offset_hz"])
             )
+            timing_estimation = pipeline_result["timing_estimation"]
+            estimated_timing_offset_samples = float(timing_estimation["timing_offset_samples"])
+            true_timing_offset_samples = float(sample.get("timing_offset_samples", 0.0))
+            if np.isfinite(estimated_timing_offset_samples):
+                timing_residual_samples = true_timing_offset_samples - estimated_timing_offset_samples
+                remaining_timing_offset_samples.append(float(timing_residual_samples))
+                remaining_timing_offset_symbols.append(float(timing_residual_samples) / float(sps))
+            estimated_fractional_timing_samples = float(timing_estimation.get("fractional_timing_offset_samples", float("nan")))
+            true_fractional_timing_samples = float(sample.get(
+                "fractional_timing_offset_samples",
+                true_timing_offset_samples,
+            ))
+            if np.isfinite(estimated_fractional_timing_samples):
+                true_fractional_timing_samples = wrap_fractional_sample_error(true_fractional_timing_samples)
+                parabolic_residual_samples = wrap_fractional_sample_error(
+                    true_fractional_timing_samples - estimated_fractional_timing_samples
+                )
+                remaining_parabolic_timing_offset_samples.append(float(parabolic_residual_samples))
+            peak_values = np.asarray(detection_result.get("peak_values", []), dtype=float)
+            if len(peak_values):
+                max_differential_correlation_values.append(float(np.max(peak_values)))
 
             demodulation = pipeline_result["demodulation"]
             differential_bits = pipeline_result["differential_demodulation"]
@@ -349,6 +386,10 @@ def evaluate_pipeline(dataset: dict[float, dict[int, dict[str, Any]]], params: d
             "missed_detection_rate": float(n_missed_detection / n_signal) if n_signal else float("nan"),
             "remaining_detection_complex_phase_rad": remaining_detection_complex_phase_rad,
             "remaining_correlation_peak_frequency_offset_hz": remaining_correlation_peak_frequency_offset_hz,
+            "remaining_timing_offset_samples": remaining_timing_offset_samples,
+            "remaining_timing_offset_symbols": remaining_timing_offset_symbols,
+            "remaining_parabolic_timing_offset_samples": remaining_parabolic_timing_offset_samples,
+            "max_differential_correlation_values": max_differential_correlation_values,
             "remaining_detection_complex_phase_mean_rad": float(np.mean(remaining_detection_complex_phase_rad))
             if remaining_detection_complex_phase_rad else float("nan"),
             "remaining_detection_complex_phase_std_rad": float(np.std(remaining_detection_complex_phase_rad))
@@ -357,6 +398,14 @@ def evaluate_pipeline(dataset: dict[float, dict[int, dict[str, Any]]], params: d
             if remaining_correlation_peak_frequency_offset_hz else float("nan"),
             "remaining_correlation_peak_frequency_offset_std_hz": float(np.std(remaining_correlation_peak_frequency_offset_hz))
             if remaining_correlation_peak_frequency_offset_hz else float("nan"),
+            "remaining_timing_offset_mean_samples": float(np.mean(remaining_timing_offset_samples))
+            if remaining_timing_offset_samples else float("nan"),
+            "remaining_timing_offset_std_samples": float(np.std(remaining_timing_offset_samples))
+            if remaining_timing_offset_samples else float("nan"),
+            "remaining_parabolic_timing_offset_mean_samples": float(np.mean(remaining_parabolic_timing_offset_samples))
+            if remaining_parabolic_timing_offset_samples else float("nan"),
+            "remaining_parabolic_timing_offset_std_samples": float(np.std(remaining_parabolic_timing_offset_samples))
+            if remaining_parabolic_timing_offset_samples else float("nan"),
             "viterbi_ber": float(np.mean(viterbi_ber_values))
             if viterbi_ber_values else float("nan"),
             "differential_ber": float(np.mean(differential_ber_values))
@@ -441,6 +490,72 @@ def plot_detection_complex_phase_estimation_vs_snr(stats: dict[float, dict[str, 
     plt.show()
 
 
+def plot_timing_estimation_vs_snr(stats: dict[float, dict[str, Any]]) -> None:
+    snr_points = []
+    timing_points = []
+    for snr_db in sorted(stats):
+        timing_offsets = stats[snr_db]["remaining_timing_offset_samples"]
+        snr_points.extend([float(snr_db)] * len(timing_offsets))
+        timing_points.extend(timing_offsets)
+
+    if not timing_points:
+        print("No correct detected signal samples for timing correction quality plot.")
+        return
+
+    plt.figure(figsize=(9, 5), constrained_layout=True)
+    plt.scatter(snr_points, timing_points, s=24, alpha=0.65)
+    plt.axhline(0.0, color="black", linewidth=1)
+    plt.xlabel("SNR [dB]")
+    plt.ylabel("true timing offset - estimated timing offset [samples]")
+    plt.title("Timing Correction Residual vs SNR")
+    plt.grid(True)
+    plt.show()
+
+
+def plot_parabolic_timing_estimation_vs_snr(stats: dict[float, dict[str, Any]]) -> None:
+    snr_points = []
+    timing_points = []
+    for snr_db in sorted(stats):
+        timing_offsets = stats[snr_db]["remaining_parabolic_timing_offset_samples"]
+        snr_points.extend([float(snr_db)] * len(timing_offsets))
+        timing_points.extend(timing_offsets)
+
+    if not timing_points:
+        print("No correct detected signal samples for parabolic timing quality plot.")
+        return
+
+    plt.figure(figsize=(9, 5), constrained_layout=True)
+    plt.scatter(snr_points, timing_points, s=24, alpha=0.65)
+    plt.axhline(0.0, color="black", linewidth=1)
+    plt.xlabel("SNR [dB]")
+    plt.ylabel("true fractional timing - parabolic estimate [samples]")
+    plt.title("Parabolic Fractional Timing Residual vs SNR")
+    plt.grid(True)
+    plt.show()
+
+
+def plot_max_differential_correlation_vs_snr(stats: dict[float, dict[str, Any]]) -> None:
+    snr_points = []
+    peak_points = []
+
+    for snr_db in sorted(stats):
+        peak_values = stats[snr_db]["max_differential_correlation_values"]
+        snr_points.extend([float(snr_db)] * len(peak_values))
+        peak_points.extend(peak_values)
+
+    if not peak_points:
+        print("No correct detected signal samples for differential correlation peak plot.")
+        return
+
+    plt.figure(figsize=(9, 5), constrained_layout=True)
+    plt.scatter(snr_points, peak_points, s=24, alpha=0.65)
+    plt.xlabel("SNR [dB]")
+    plt.ylabel("max differential correlation peak")
+    plt.title("Max Differential Correlation Peak vs SNR")
+    plt.grid(True)
+    plt.show()
+
+
 def plot_ber_and_time_vs_snr(stats: dict[float, dict[str, Any]], ber_floor: float) -> None:
     snrs = np.asarray(sorted(stats), dtype=float)
     viterbi_ber = np.asarray([stats[snr]["viterbi_ber"] for snr in snrs], dtype=float)
@@ -520,6 +635,10 @@ def print_summary(stats: dict[float, dict[str, Any]]) -> None:
 def print_timing_summary(stats: dict[float, dict[str, Any]]) -> None:
     timing_names = [
         "detection",
+        "timing_estimation",
+        "timing_correction",
+        "frequency_estimation",
+        "phase_estimation",
         "demodulation",
         "differential_demodulation",
         "total",
@@ -549,18 +668,24 @@ def main() -> None:
         "constellation_type": "PAM",
         "constellation_order": 4,
         "noise_type": "snr",
-        "snr_db_values": tuple(range(-5, 15, 1)),
+        "snr_db_values": tuple(range(10, 15, 1)),
         "n_samples_per_snr": 20,
-        "signal_probability": 0.5,
+        "signal_probability": 1,
         "min_frequency_offset_hz": -300.0,
         "max_frequency_offset_hz": 300.0,
         "min_phase_offset_rad": 0 * np.pi,
         "max_phase_offset_rad": 2 * np.pi,
-        "simulate_timing_offset": False,
-        "timing_offset_symbols": 0.0,
-        "min_timing_offset_symbols": -0.25,
-        "max_timing_offset_symbols": 0.25,
+        "simulate_timing_offset": True,
+        "min_integer_timing_shift_samples": -10,
+        "max_integer_timing_shift_samples": 10,
+        "min_frac_timing_shift_samples": -0.4,
+        "max_frac_timing_shift_samples": 0.4,
         "timing_offset_filter_taps": 81,
+        "correct_timing_offset": True,
+        "timing_correction_filter_taps": 81,
+        "timing_complex_correlation_peak_search_radius_samples": 20,
+        "corrected_correlation_peak_search_radius_samples": 2,
+        "corrected_complex_correlation_peak_search_radius_samples": 20,
         "total_signal_duration_sec": 0.3500,
         "leading_noise_duration_sec": 0.050,
         "uw_spacing_sec": 0.100,
@@ -580,14 +705,14 @@ def main() -> None:
         "viterbi_max_survivors": 256,
         "viterbi_metric_memory_symbols": 3,
         "viterbi_metric_type": "real",  # "real" or "abs"
-        "pll_alpha": 0.01,
+        "pll_alpha": 0.05,
         "pll_beta": 0.004,
         "differential_ber_edge_trim_symbols": None,
         "plot_pll_lock": False,
         "max_pll_lock_plots": 5,
         "max_print_error_indices": 20,
         "ber_plot_floor": 0.002,
-        "random_seed":10,
+        "random_seed":42,
     }
 
 
@@ -607,6 +732,9 @@ def main() -> None:
     plot_fa_md_vs_snr(stats)
     plot_frequency_estimation_vs_snr(stats)
     plot_detection_complex_phase_estimation_vs_snr(stats)
+    plot_timing_estimation_vs_snr(stats)
+    plot_parabolic_timing_estimation_vs_snr(stats)
+    plot_max_differential_correlation_vs_snr(stats)
     plot_ber_and_time_vs_snr(stats, ber_floor=params["ber_plot_floor"])
 
 

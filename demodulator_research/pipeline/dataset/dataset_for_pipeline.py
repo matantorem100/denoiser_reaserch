@@ -40,15 +40,25 @@ def apply_timing_offset(signal: np.ndarray, delay_samples: float, num_taps: int 
     return real + 1j * imag
 
 
-def choose_timing_offset_symbols(params: dict[str, Any], rng: np.random.Generator, has_signal: bool) -> float:
+def choose_frac_timing_shift_samples(params: dict[str, Any], rng: np.random.Generator, has_signal: bool) -> float:
     if not bool(params.get("simulate_timing_offset", False)) or not has_signal:
         return 0.0
-    if "timing_offset_symbols" in params:
-        return float(params["timing_offset_symbols"])
+
     return float(rng.uniform(
-        float(params.get("min_timing_offset_symbols", 0.0)),
-        float(params.get("max_timing_offset_symbols", 0.0)),
+        float(params.get("min_frac_timing_shift_samples", 0.0)),
+        float(params.get("max_frac_timing_shift_samples", 0.0)),
     ))
+
+
+def choose_integer_timing_shift_samples(params: dict[str, Any], rng: np.random.Generator, has_signal: bool) -> int:
+    if not bool(params.get("simulate_timing_offset", False)) or not has_signal:
+        return 0
+
+    min_shift = int(params.get("min_integer_timing_shift_samples", 0))
+    max_shift = int(params.get("max_integer_timing_shift_samples", 0))
+    if min_shift == max_shift:
+        return min_shift
+    return int(rng.integers(min_shift, max_shift + 1))
 
 
 def build_pipeline_test_dataset(params: dict[str, Any]) -> dict[float, dict[int, dict[str, Any]]]:
@@ -140,8 +150,13 @@ def build_pipeline_test_dataset(params: dict[str, Any]) -> dict[float, dict[int,
 
             frequency_offset_hz = float(rng.uniform(float(params["min_frequency_offset_hz"]), float(params["max_frequency_offset_hz"])))
             phase_offset_rad = float(rng.uniform(float(params["min_phase_offset_rad"]), float(params["max_phase_offset_rad"])))
-            timing_offset_symbols = choose_timing_offset_symbols(params=params, rng=rng, has_signal=has_signal)
-            timing_offset_samples = float(timing_offset_symbols) * float(sps)
+            fractional_timing_offset_samples = choose_frac_timing_shift_samples(
+                params=params,
+                rng=rng,
+                has_signal=has_signal,
+            )
+            integer_timing_shift_samples = choose_integer_timing_shift_samples(params=params, rng=rng, has_signal=has_signal)
+            timing_offset_samples = float(integer_timing_shift_samples) + float(fractional_timing_offset_samples)
 
             dataset_config = DatasetConfig(
                 sample_rate=sample_rate,
@@ -176,26 +191,32 @@ def build_pipeline_test_dataset(params: dict[str, Any]) -> dict[float, dict[int,
 
             # Force exactly the requested block length. Dataset adds leading
             # noise before the signal, and convolution can make the signal a few
-            # samples longer than the nominal symbol count.
+            # samples longer than the nominal symbol count. Timing offset is
+            # applied to the clean signal component only; the generated AWGN is
+            # then added back without interpolation so it stays white.
             rx_signal = np.asarray(sample["rx_signal"], dtype=np.complex128)
-            if has_signal and not np.isclose(timing_offset_samples, 0.0):
-                rx_signal = apply_timing_offset(
-                    signal=rx_signal,
-                    delay_samples=timing_offset_samples,
+            channel_noise = np.asarray(sample["channel_noise"], dtype=np.complex128)
+            clean_signal = rx_signal - channel_noise
+            if has_signal and not np.isclose(fractional_timing_offset_samples, 0.0):
+                clean_signal = apply_timing_offset(
+                    signal=clean_signal,
+                    delay_samples=fractional_timing_offset_samples,
                     num_taps=timing_offset_filter_taps,
                 )
+            if has_signal and int(integer_timing_shift_samples) != 0:
+                shift = int(integer_timing_shift_samples)
+                if shift > 0:
+                    clean_signal = np.pad(clean_signal, (shift, 0))[:len(clean_signal)]
+                else:
+                    clean_signal = np.pad(clean_signal[-shift:], (0, -shift))
+                sample["uw_start_samples"] = [int(start) + shift for start in sample["uw_start_samples"]]
+
+            rx_signal = clean_signal + channel_noise
             if len(rx_signal) >= total_signal_samples:
                 sample["rx_signal"] = rx_signal[:total_signal_samples]
             else:
                 sample["rx_signal"] = np.pad(rx_signal, (0, total_signal_samples - len(rx_signal)))
 
-            channel_noise = np.asarray(sample["channel_noise"], dtype=np.complex128)
-            if has_signal and not np.isclose(timing_offset_samples, 0.0):
-                channel_noise = apply_timing_offset(
-                    signal=channel_noise,
-                    delay_samples=timing_offset_samples,
-                    num_taps=timing_offset_filter_taps,
-                )
             if len(channel_noise) >= total_signal_samples:
                 sample["channel_noise"] = channel_noise[:total_signal_samples]
             else:
@@ -208,7 +229,9 @@ def build_pipeline_test_dataset(params: dict[str, Any]) -> dict[float, dict[int,
             sample["uw_spacing_samples"] = int(uw_spacing_samples)
             sample["uw_spacing_bits"] = int(uw_spacing_bits)
             sample["has_signal"] = bool(has_signal)
-            sample["timing_offset_symbols"] = float(timing_offset_symbols)
+            sample["timing_offset_symbols"] = float(fractional_timing_offset_samples) / float(sps) if sps > 0 else 0.0
+            sample["fractional_timing_offset_samples"] = float(fractional_timing_offset_samples)
+            sample["integer_timing_shift_samples"] = int(integer_timing_shift_samples)
             sample["timing_offset_samples"] = float(timing_offset_samples)
 
             dataset[snr_db][sample_index] = sample

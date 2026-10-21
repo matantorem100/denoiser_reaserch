@@ -85,15 +85,10 @@ def create_dataset(params: dict) -> dict[float, dict[int, dict]]:
 # First step - detection - find the places of the uw using differential correlation and find grid function
 ##########################################################################################################
 
-def detection(signal: np.ndarray, middle_cpfsk_uw: np.ndarray, threshold: float, sps: int, sample_rate: float,
-                          uw_spacing_samples: int, n_uw: int | None, grid_tolerance_samples: int,
-                          uw_n_symbols: int, n_symbols_each_side: int,
-                          min_peak_distance_samples: int, min_n_uw: int,
-                          first_peak_weight: float,
-                          complex_phase_correlation_shift_samples: int | None = None,
-                          frequency_correction_origin_sample: int = 0,
-                          full_uw: np.ndarray = None,
-                          initial_phase_future_guard_symbols: int = 0) -> dict:
+def detection(signal: np.ndarray, middle_cpfsk_uw: np.ndarray, threshold: float, sps: int,
+              uw_spacing_samples: int, n_uw: int | None, grid_tolerance_samples: int,
+              min_peak_distance_samples: int, min_n_uw: int, first_peak_weight: float,
+              full_uw: np.ndarray = None) -> dict:
     differential_lag_samples = int(sps)
     detector = UwDetector(method_type="differential_correlation", differential_lag_samples=differential_lag_samples)
     differential_correlation = detector.estimate(signal=np.asarray(signal, dtype=np.complex64),
@@ -109,26 +104,160 @@ def detection(signal: np.ndarray, middle_cpfsk_uw: np.ndarray, threshold: float,
                              min_n_uw=int(min_n_uw),
                              first_peak_weight=float(first_peak_weight))
 
-    offset_differential = len(middle_cpfsk_uw) // 2 + (len(full_uw) - len(middle_cpfsk_uw))//2 - differential_lag_samples / 2
+    full_uw_len = len(full_uw) if full_uw is not None else len(middle_cpfsk_uw)
+    offset_differential = len(middle_cpfsk_uw) // 2 + (full_uw_len - len(middle_cpfsk_uw)) // 2 - differential_lag_samples / 2
     uw_start_samples = [int(peak - offset_differential) for peak in grid.uw_positions]
     detected = len(uw_start_samples) >= int(min_n_uw)
     if n_uw is not None:
         detected = detected and len(uw_start_samples) == int(n_uw)
 
+    return {
+        "detected": bool(detected),
+        "uw_start_samples": uw_start_samples,
+        "peak_indices": list(grid.uw_positions),
+        "peak_values": list(grid.peak_values),
+        "grid_score": float(grid.score),
+        "differential_correlation": differential_correlation,
+        "differential_correlation_abs": differential_correlation_abs,
+    }
+
+
+##########################################################################################################
+# Frequency estimation from detected differential-correlation peaks
+##########################################################################################################
+def estimate_frequency_offset_from_detection(differential_correlation: np.ndarray, peak_indices: list[int],
+                                             sample_rate: float, sps: int) -> dict:
     frequency_offset_phase_rad = float("nan")
     frequency_offset_estimation_hz = float("nan")
-    if len(grid.uw_positions) > 0:
+    if len(peak_indices) > 0:
         peak_phases = np.asarray([np.angle(differential_correlation[int(peak_index)])
-                                  for peak_index in grid.uw_positions], dtype=np.float64)
+                                  for peak_index in peak_indices], dtype=np.float64)
         frequency_offset_phase_rad = float(np.angle(np.mean(np.exp(1j * peak_phases))))
         frequency_offset_estimation_hz = float(frequency_offset_phase_rad * float(sample_rate) / (TWO_PI * float(sps)))
 
+    return {
+        "frequency_offset_estimation_phase_rad": frequency_offset_phase_rad,
+        "frequency_offset_hz": frequency_offset_estimation_hz,
+    }
+
+
+def correct_frequency_offset(signal: np.ndarray, frequency_offset_hz: float,
+                             sample_rate: float, origin_sample: int = 0) -> np.ndarray:
+    signal = np.asarray(signal, dtype=np.complex64).reshape(-1)
+    if not np.isfinite(frequency_offset_hz) or np.isclose(float(frequency_offset_hz), 0.0):
+        return signal.copy()
+
+    n = np.arange(len(signal), dtype=np.float32) - np.float32(origin_sample)
+    phase_scale = np.float32(-2.0 * np.pi / float(sample_rate))
+    return (signal * np.exp(1j * phase_scale * np.float32(frequency_offset_hz) * n).astype(np.complex64)).astype(np.complex64)
+
+
+def recompute_differential_correlation_for_estimation(signal: np.ndarray, middle_cpfsk_uw: np.ndarray,
+                                                      peak_indices: list[int], sps: int,
+                                                      peak_search_radius_samples: int = 2) -> dict:
+    detector = UwDetector(method_type="differential_correlation", differential_lag_samples=int(sps))
+    differential_correlation = detector.estimate(
+        signal=np.asarray(signal, dtype=np.complex64),
+        cpfsk_uw=np.asarray(middle_cpfsk_uw, dtype=np.complex64),
+    )
+    differential_correlation_abs = np.abs(differential_correlation)
+
+    corrected_peak_indices = []
+    corrected_peak_values = []
+    search_radius = max(0, int(peak_search_radius_samples))
+    for peak_index in peak_indices:
+        peak_index = int(peak_index)
+        search_start = max(0, peak_index - search_radius)
+        search_stop = min(len(differential_correlation_abs), peak_index + search_radius + 1)
+        if search_start >= search_stop:
+            continue
+
+        local_peak_index = int(search_start + int(np.argmax(differential_correlation_abs[search_start:search_stop])))
+        corrected_peak_indices.append(local_peak_index)
+        corrected_peak_values.append(float(differential_correlation_abs[local_peak_index]))
+
+    return {
+        "differential_correlation": differential_correlation,
+        "differential_correlation_abs": differential_correlation_abs,
+        "peak_indices": corrected_peak_indices,
+        "peak_values": corrected_peak_values,
+    }
+
+
+def compute_complex_correlation_for_estimation(signal: np.ndarray, cpfsk_uw: np.ndarray,
+                                               predicted_peak_indices: list[int],
+                                               peak_search_radius_samples: int) -> dict:
+    complex_correlation_instance = UwDetector(method_type="complex_correlation")
+    complex_correlation = complex_correlation_instance.estimate(
+        np.asarray(signal, dtype=np.complex64),
+        np.asarray(cpfsk_uw, dtype=np.complex64),
+    )
+    complex_correlation_abs = np.abs(complex_correlation)
+
+    peak_indices = []
+    peak_values = []
+    search_radius = max(0, int(peak_search_radius_samples))
+    for peak_index in predicted_peak_indices:
+        peak_index = int(peak_index)
+        search_start = max(0, peak_index - search_radius)
+        search_stop = min(len(complex_correlation_abs), peak_index + search_radius + 1)
+        if search_start >= search_stop:
+            continue
+
+        local_peak_index = int(search_start + int(np.argmax(complex_correlation_abs[search_start:search_stop])))
+        peak_indices.append(local_peak_index)
+        peak_values.append(float(complex_correlation_abs[local_peak_index]))
+
+    return {
+        "complex_correlation": complex_correlation,
+        "complex_correlation_abs": complex_correlation_abs,
+        "peak_indices": peak_indices,
+        "peak_values": peak_values,
+    }
+
+
+##########################################################################################################
+# Initial phase estimation from complex correlation after frequency correction
+##########################################################################################################
+def estimate_initial_phase_from_complex_correlation(complex_correlation: np.ndarray,
+                                                    peak_indices: list[int]) -> dict:
+    initial_phase_estimation_rad = float("nan")
+    initial_phase_correlation_score = float("nan")
+    complex_phase_indices = []
+
+    if peak_indices:
+        complex_index = int(peak_indices[0])
+        complex_index = int(min(max(complex_index, 0), len(complex_correlation) - 1))
+        initial_phase_estimation_rad = float(np.angle(complex_correlation[complex_index]))
+        initial_phase_correlation_score = float(np.abs(complex_correlation[complex_index]))
+        complex_phase_indices = [complex_index]
+
+    return {
+        "initial_phase_estimation_rad": initial_phase_estimation_rad,
+        "_initial_phase_for_viterbi_rad": initial_phase_estimation_rad,
+        "initial_phase_correlation_score": initial_phase_correlation_score,
+        "initial_phase_reference_len": 0,
+        "initial_phase_correlation_indices": complex_phase_indices,
+    }
+
+
+def estimate_initial_phase_from_detection(signal: np.ndarray, middle_cpfsk_uw: np.ndarray,
+                                          detection_result: dict, frequency_offset_estimation_hz: float,
+                                          sample_rate: float, sps: int, uw_n_symbols: int,
+                                          grid_tolerance_samples: int,
+                                          complex_phase_correlation_shift_samples: int | None = None,
+                                          frequency_correction_origin_sample: int = 0,
+                                          full_uw: np.ndarray = None,
+                                          initial_phase_future_guard_symbols: int = 0) -> dict:
     initial_phase_estimation_rad = float("nan")
     initial_phase_correlation_score = float("nan")
     initial_phase_reference_len = 0
     complex_phase_indices = []
 
-    if len(grid.uw_positions) > 0 and np.isfinite(frequency_offset_estimation_hz):
+    peak_indices = detection_result["peak_indices"]
+    uw_start_samples = detection_result["uw_start_samples"]
+
+    if len(peak_indices) > 0 and np.isfinite(frequency_offset_estimation_hz):
         complex_correlation_instance = UwDetector(method_type="complex_correlation")
         n = np.arange(len(signal), dtype=np.float32) - np.float32(frequency_correction_origin_sample)
         phase_scale = np.float32(-2.0 * np.pi / float(sample_rate))
@@ -141,7 +270,7 @@ def detection(signal: np.ndarray, middle_cpfsk_uw: np.ndarray, threshold: float,
             predicted_complex_index = int(uw_start_samples[0]) + int(len(phase_reference) // 2)
         else:
             phase_reference = np.asarray(middle_cpfsk_uw, dtype=np.complex64).reshape(-1)
-            predicted_complex_index = int(grid.uw_positions[0]) + int(complex_phase_correlation_shift_samples or 0)
+            predicted_complex_index = int(peak_indices[0]) + int(complex_phase_correlation_shift_samples or 0)
 
         complex_correlation = complex_correlation_instance.estimate(corrected_signal, cpfsk_uw=phase_reference)
         search_radius = max(int(grid_tolerance_samples), int(sps))
@@ -160,13 +289,6 @@ def detection(signal: np.ndarray, middle_cpfsk_uw: np.ndarray, threshold: float,
         initial_phase_reference_len = int(len(phase_reference))
 
     return {
-        "detected": bool(detected),
-        "uw_start_samples": uw_start_samples,
-        "peak_indices": list(grid.uw_positions),
-        "peak_values": list(grid.peak_values),
-        "grid_score": float(grid.score),
-        "frequency_offset_estimation_phase_rad": frequency_offset_phase_rad,
-        "frequency_offset_estimation_hz": frequency_offset_estimation_hz,
         "initial_phase_estimation_rad": initial_phase_estimation_rad,
         "_initial_phase_for_viterbi_rad": initial_phase_estimation_rad,
         "initial_phase_correlation_score": initial_phase_correlation_score,
@@ -176,42 +298,142 @@ def detection(signal: np.ndarray, middle_cpfsk_uw: np.ndarray, threshold: float,
 
 
 ##########################################################################################################
-# second step - coarse frequency estimation using differential circular coarse estimation
+# Timing estimation and correction
 ##########################################################################################################
-def estimate_frequency_offset_from_detected_uws(signal: np.ndarray, uw_start_samples: list[int], sample_rate: float) -> dict:
+def correct_timing_offset(signal: np.ndarray, timing_offset_samples: float, num_taps: int = 81) -> np.ndarray:
     signal = np.asarray(signal, dtype=np.complex64).reshape(-1)
-    if len(signal) < 2 or not uw_start_samples:
-        return {"frequency_offset_hz": float("nan")}
+    if len(signal) == 0 or np.isclose(float(timing_offset_samples), 0.0):
+        return signal.copy()
 
-    start = max(int(uw_start_samples[0]), 0)
-    estimated_frequency_offset = FrequencyOffsetEstimator.differential_circular_coarse_estimation(
-        signal=signal[start:],
-        sample_rate=float(sample_rate),
-    )
+    num_taps = int(num_taps)
+    if num_taps < 3:
+        raise ValueError("num_taps must be at least 3")
+    if num_taps % 2 == 0:
+        num_taps += 1
 
-    return {"frequency_offset_hz": estimated_frequency_offset}
+    n = np.arange(num_taps, dtype=np.float64)
+    center = (num_taps - 1) / 2.0
+    delay_samples = -float(timing_offset_samples)
+    taps = np.sinc(n - center - delay_samples)
+    taps *= np.hamming(num_taps)
+    taps_sum = float(np.sum(taps))
+    if np.isclose(taps_sum, 0.0):
+        raise ValueError("fractional timing correction filter has near-zero DC gain")
+    taps /= taps_sum
+
+    real_full = np.convolve(np.real(signal), taps, mode="full")
+    imag_full = np.convolve(np.imag(signal), taps, mode="full")
+    start = (len(real_full) - len(signal)) // 2
+    stop = start + len(signal)
+    return (real_full[start:stop] + 1j * imag_full[start:stop]).astype(np.complex64)
 
 
-##########################################################################################################
-# third step - fine frequency estimation using hypothesis
-##########################################################################################################
-def fine_frequency_estimation(signal: np.ndarray, sample_rate: float, coarse_estimation: float, middle_cpfsk_uw: np.ndarray) -> dict:
-    if not np.isfinite(coarse_estimation):
-        return {"frequency_offset_hz": float("nan")}
+def estimate_and_correct_timing_offset(signal: np.ndarray, correlation: np.ndarray, peak_indices: list[int],
+                                       uw_start_samples: list[int], nominal_start_sample: int,
+                                       sps: int, num_taps: int = 81,
+                                       apply_correction: bool = True) -> tuple[np.ndarray, int, dict, dict]:
+    """
+    Estimate and correct timing using exactly the two mechanisms in the receiver.
+
+    Flow:
+    1. Integer timing:
+       The sliding UW correlation already finds the UW at an integer sample
+       position. Therefore the integer timing error is
+
+           detected_first_uw_start - nominal_signal_start
+
+       The correction is to start demodulation from the detected UW start,
+       not from the nominal start.
+
+    2. Fractional timing:
+       Around every detected correlation peak k, take one sample from each side
+       and fit the parabola
+
+           p(x) = a*x^2 + b*x + c
+
+       through
+
+           p(-1) = correlation[k - 1]
+           p( 0) = correlation[k]
+           p(+1) = correlation[k + 1]
+
+       The true sub-sample maximum is at
+
+           delta = 0.5 * (y[-1] - y[+1]) / (y[-1] - 2*y[0] + y[+1])
+
+       so the refined peak is k + delta, where delta is clipped to [-0.5, 0.5].
+       Averaging the deltas from all UWs gives the fractional timing estimate.
+
+    3. Correction:
+       Integer part: use the detected UW start as the demodulation start.
+       Fractional part: if the peak is late by +delta samples, advance the
+       waveform by applying a fractional delay of -delta samples.
+    """
+    estimate_start_time = time.perf_counter()
     signal = np.asarray(signal, dtype=np.complex64).reshape(-1)
-    middle_cpfsk_uw = np.asarray(middle_cpfsk_uw, dtype=np.complex64).reshape(-1)
-    grid_of_frequency_estimations = np.arange(coarse_estimation - 100, coarse_estimation + 100, 10, dtype=np.float32)
-    complex_correlation_instance = UwDetector(method_type="complex_correlation")
-    n = np.arange(len(signal), dtype=np.float32)
-    phase_scale = np.float32(-2.0 * np.pi / float(sample_rate))
-    best_peak_list = []
-    for frequency in grid_of_frequency_estimations:
-        current_corrected_signal = signal * np.exp(1j * phase_scale * np.float32(frequency) * n).astype(np.complex64)
-        complex_correlation = complex_correlation_instance.estimate(current_corrected_signal, middle_cpfsk_uw)
-        best_peak_list.append(float(np.max(complex_correlation)))
-    best_peak_array = np.asarray(best_peak_list, dtype=np.float32)
-    best_frequency_estimation = grid_of_frequency_estimations[np.argmax(best_peak_array)]
-    return {"frequency_offset_hz": float(best_frequency_estimation)}
+    correlation = np.asarray(correlation, dtype=np.float64).reshape(-1)
+    nominal_start_sample = int(nominal_start_sample)
+    integer_timing_offset_samples = 0
+    corrected_start_sample = nominal_start_sample
+    if uw_start_samples:
+        corrected_start_sample = int(uw_start_samples[0])
+        integer_timing_offset_samples = corrected_start_sample - nominal_start_sample
+
+    parabolic_offsets = []
+    parabolic_positions = []
+    for peak_index in peak_indices:
+        peak_index = int(peak_index)
+        if peak_index <= 0 or peak_index >= len(correlation) - 1:
+            continue
+
+        y_minus = float(correlation[peak_index - 1])
+        y_zero = float(correlation[peak_index])
+        y_plus = float(correlation[peak_index + 1])
+        denominator = y_minus - 2.0 * y_zero + y_plus
+        if np.isclose(denominator, 0.0):
+            fractional_offset = 0.0
+        else:
+            # Vertex of p(x)=a*x^2+b*x+c is at -b/(2a). Written directly
+            # for the three samples at x=-1,0,+1.
+            fractional_offset = 0.5 * (y_minus - y_plus) / denominator
+        fractional_offset = float(np.clip(fractional_offset, -0.5, 0.5))
+        parabolic_offsets.append(fractional_offset)
+        parabolic_positions.append(float(peak_index) + fractional_offset)
+
+    fractional_timing_offset_samples = float(np.mean(parabolic_offsets)) if parabolic_offsets else 0.0
+    total_timing_offset_samples = float(integer_timing_offset_samples) + float(fractional_timing_offset_samples)
+    timing_estimation = {
+        "integer_timing_offset_samples": int(integer_timing_offset_samples),
+        "fractional_timing_offset_samples": float(fractional_timing_offset_samples),
+        "timing_offset_samples": float(total_timing_offset_samples),
+        "timing_offset_symbols": float(total_timing_offset_samples) / float(sps) if int(sps) > 0 else float("nan"),
+        "parabolic_offsets_samples": [float(offset) for offset in parabolic_offsets],
+        "parabolic_peak_positions": [float(position) for position in parabolic_positions],
+        "nominal_start_sample": int(nominal_start_sample),
+        "corrected_start_sample": int(corrected_start_sample),
+    }
+    estimate_time_sec = time.perf_counter() - estimate_start_time
+
+    correction_start_time = time.perf_counter()
+    corrected_signal = signal.copy()
+    if bool(apply_correction) and abs(fractional_timing_offset_samples) > 1e-6:
+        corrected_signal = correct_timing_offset(
+            signal=signal,
+            timing_offset_samples=float(fractional_timing_offset_samples),
+            num_taps=int(num_taps),
+        )
+
+    if not bool(apply_correction):
+        corrected_start_sample = nominal_start_sample
+        timing_estimation["corrected_start_sample"] = int(corrected_start_sample)
+    correction_time_sec = time.perf_counter() - correction_start_time
+
+    timing_breakdown = {
+        "timing_estimation": float(estimate_time_sec),
+        "timing_correction": float(correction_time_sec),
+    }
+    return corrected_signal, int(corrected_start_sample), timing_estimation, timing_breakdown
+
 
 
 def calculate_remaining_phase_at_uws(signal: np.ndarray, cpfsk_uw: np.ndarray, uw_start_samples: list[int],
@@ -870,61 +1092,152 @@ def differential_demodulation(signal: np.ndarray, params: dict, n_symbols: int,
     )
 
 
-def pipeline(signal: np.ndarray, middle_cpfsk_uw: np.ndarray, params: dict,
-             n_symbols: int | None = None, signal_start_sample: int = 0, full_uw: np.ndarray = None) -> dict:
+def pipeline(signal: np.ndarray, middle_cpfsk_uw: np.ndarray, params: dict, n_symbols: int ,
+             signal_start_sample: int, full_uw: np.ndarray) -> dict:
     total_start_time = time.perf_counter()
-    timing_sec = {
-        "detection": 0.0,
-        "coarse_frequency_estimation": 0.0,
-        "fine_frequency_estimation": 0.0,
-        "demodulation": 0.0,
-        "differential_demodulation": 0.0,
-        "total": 0.0,
-    }
+    timing_sec = {"detection": 0.0, "timing_estimation": 0.0, "timing_correction": 0.0, "frequency_estimation": 0.0,
+                  "phase_estimation": 0.0, "coarse_frequency_estimation": 0.0, "fine_frequency_estimation": 0.0,
+                  "demodulation": 0.0, "differential_demodulation": 0.0, "total": 0.0}
 
     signal = np.asarray(signal, dtype=np.complex64).reshape(-1)
     sps = int(round(float(params["sample_rate"]) * float(params["symbol_time"])))
-    bits_per_symbol = int(np.log2(int(params["constellation_order"])))
-    uw_n_symbols = len(params["uw_bits"]) // bits_per_symbol
-    n_symbols_each_side = int(params["middle_crop_symbols_each_side"])
     uw_spacing_samples = int(params.get("uw_spacing_samples", round(float(params["uw_spacing_sec"]) * float(params["sample_rate"]))))
-    initial_phase_future_guard_symbols = params.get("initial_phase_future_guard_symbols", None)
-    if initial_phase_future_guard_symbols is None:
-        initial_phase_future_guard_symbols = int(math.ceil(float(params["span_in_symbols"]) / 2.0))
     stage_start_time = time.perf_counter()
     detection_result = detection(signal=signal, middle_cpfsk_uw=middle_cpfsk_uw, threshold=params["detection_threshold"],
-                                 sps=sps, sample_rate=params["sample_rate"], uw_spacing_samples=uw_spacing_samples,
+                                 sps=sps, uw_spacing_samples=uw_spacing_samples,
                                  n_uw=params.get("detection_n_uw", None),
-                                 grid_tolerance_samples=params["grid_tolerance_samples"], uw_n_symbols=uw_n_symbols,
-                                 n_symbols_each_side=n_symbols_each_side,
+                                 grid_tolerance_samples=params["grid_tolerance_samples"],
                                  min_peak_distance_samples=params["min_peak_distance_samples"],
                                  min_n_uw=params["min_n_uw_for_detection"],
                                  first_peak_weight=params["grid_first_peak_weight"],
-                                 complex_phase_correlation_shift_samples=params.get(
-                                     "complex_phase_correlation_shift_samples", sps // 2),
-                                 frequency_correction_origin_sample=int(signal_start_sample),
-                                 full_uw=full_uw,
-                                 initial_phase_future_guard_symbols=int(initial_phase_future_guard_symbols))
+                                 full_uw=full_uw)
     timing_sec["detection"] = time.perf_counter() - stage_start_time
 
     coarse_frequency_estimation = {"frequency_offset_hz": float("nan")}
     fine_frequency_estimation_result = {"frequency_offset_hz": float("nan")}
     frequency_estimation = {"frequency_offset_hz": float("nan"), "source": "detection"}
+    timing_estimation = {"timing_offset_samples": 0.0, "timing_offset_symbols": 0.0, "parabolic_offsets_samples": [],
+                         "parabolic_peak_positions": []}
     demodulation = None
     differential_demodulation_bits = None
     run_demodulation = bool(params.get("run_demodulation", True))
+    run_timing_correction = bool(params.get("correct_timing_offset", False))
+    signal_for_demod = signal
+    start_sample_for_demod = int(signal_start_sample)
 
-    if detection_result["detected"] and run_demodulation:
-        detection_frequency_offset_hz = float(detection_result["frequency_offset_estimation_hz"])
+    if detection_result["detected"]:
+        # 2. First CFO estimate from the original differential-correlation peaks.
+        stage_start_time = time.perf_counter()
+        first_frequency_estimation = estimate_frequency_offset_from_detection(
+            differential_correlation=detection_result["differential_correlation"],
+            peak_indices=detection_result["peak_indices"],
+            sample_rate=params["sample_rate"],
+            sps=sps,
+        )
+        first_frequency_offset_hz = float(first_frequency_estimation["frequency_offset_hz"])
+        signal_for_timing_estimation = correct_frequency_offset(
+            signal=signal,
+            frequency_offset_hz=first_frequency_offset_hz,
+            sample_rate=params["sample_rate"],
+            origin_sample=int(signal_start_sample),
+        )
+        frequency_estimation_time = time.perf_counter() - stage_start_time
+        timing_sec["frequency_estimation"] = frequency_estimation_time
+        timing_sec["coarse_frequency_estimation"] = frequency_estimation_time
+
+        # 3. Estimate fractional timing from complex-correlation magnitude, then correct timing.
+        complex_shift = int(params.get("complex_phase_correlation_shift_samples", sps // 2))
+        predicted_complex_peak_indices = [int(peak_index) + complex_shift for peak_index in detection_result["peak_indices"]]
+        complex_correlation_for_timing = compute_complex_correlation_for_estimation(
+            signal=signal_for_timing_estimation,
+            cpfsk_uw=middle_cpfsk_uw,
+            predicted_peak_indices=predicted_complex_peak_indices,
+            peak_search_radius_samples=int(params.get("timing_complex_correlation_peak_search_radius_samples",
+                                                      params["grid_tolerance_samples"])),
+        )
+        signal_for_demod, start_sample_for_demod, timing_estimation, timing_breakdown = estimate_and_correct_timing_offset(
+            signal=signal,
+            correlation=complex_correlation_for_timing["complex_correlation_abs"],
+            peak_indices=complex_correlation_for_timing["peak_indices"],
+            uw_start_samples=detection_result["uw_start_samples"],
+            nominal_start_sample=int(signal_start_sample),
+            sps=sps,
+            num_taps=int(params.get("timing_correction_filter_taps",
+                                    params.get("timing_offset_filter_taps", 81))),
+            apply_correction=run_timing_correction,
+        )
+        timing_sec["timing_estimation"] = float(timing_breakdown["timing_estimation"])
+        timing_sec["timing_correction"] = float(timing_breakdown["timing_correction"])
+        detection_result["first_frequency_offset_estimation_hz"] = first_frequency_offset_hz
+        detection_result["first_frequency_offset_estimation_phase_rad"] = first_frequency_estimation[
+            "frequency_offset_estimation_phase_rad"
+        ]
+        detection_result["complex_peak_indices_for_timing"] = complex_correlation_for_timing["peak_indices"]
+        detection_result["complex_peak_values_for_timing"] = complex_correlation_for_timing["peak_values"]
+
+        # 4. Recompute differential and complex correlations on the timing-corrected signal.
+        stage_start_time = time.perf_counter()
+        corrected_correlation = recompute_differential_correlation_for_estimation(
+            signal=signal_for_demod,
+            middle_cpfsk_uw=middle_cpfsk_uw,
+            peak_indices=detection_result["peak_indices"],
+            sps=sps,
+            peak_search_radius_samples=int(params.get("corrected_correlation_peak_search_radius_samples", 2)),
+        )
+        # 5. Final CFO from the new differential correlation.
+        detection_frequency_estimation = estimate_frequency_offset_from_detection(
+            differential_correlation=corrected_correlation["differential_correlation"],
+            peak_indices=corrected_correlation["peak_indices"],
+            sample_rate=params["sample_rate"],
+            sps=sps,
+        )
+        frequency_estimation_time = time.perf_counter() - stage_start_time
+        timing_sec["frequency_estimation"] = frequency_estimation_time
+        timing_sec["coarse_frequency_estimation"] = frequency_estimation_time
+
+        detection_frequency_offset_hz = float(detection_frequency_estimation["frequency_offset_hz"])
         frequency_estimation = {
             "frequency_offset_hz": detection_frequency_offset_hz,
             "source": "detection",
         }
+        detection_result["frequency_offset_estimation_phase_rad"] = detection_frequency_estimation[
+            "frequency_offset_estimation_phase_rad"
+        ]
+        detection_result["frequency_offset_estimation_hz"] = detection_frequency_offset_hz
+        detection_result["corrected_peak_indices_for_estimation"] = corrected_correlation["peak_indices"]
+        detection_result["corrected_peak_values_for_estimation"] = corrected_correlation["peak_values"]
+
+        stage_start_time = time.perf_counter()
+        signal_for_phase_estimation = correct_frequency_offset(
+            signal=signal_for_demod,
+            frequency_offset_hz=detection_frequency_offset_hz,
+            sample_rate=params["sample_rate"],
+            origin_sample=int(start_sample_for_demod),
+        )
+        corrected_complex_correlation = compute_complex_correlation_for_estimation(
+            signal=signal_for_phase_estimation,
+            cpfsk_uw=middle_cpfsk_uw,
+            predicted_peak_indices=predicted_complex_peak_indices,
+            peak_search_radius_samples=int(params.get("corrected_complex_correlation_peak_search_radius_samples",
+                                                      params["grid_tolerance_samples"])),
+        )
+        phase_estimation_result = estimate_initial_phase_from_complex_correlation(
+            complex_correlation=corrected_complex_correlation["complex_correlation"],
+            peak_indices=corrected_complex_correlation["peak_indices"],
+        )
+        phase_estimation_time = time.perf_counter() - stage_start_time
+        timing_sec["phase_estimation"] = phase_estimation_time
+        timing_sec["fine_frequency_estimation"] = phase_estimation_time
+        detection_result["corrected_complex_peak_indices_for_phase"] = corrected_complex_correlation["peak_indices"]
+        detection_result["corrected_complex_peak_values_for_phase"] = corrected_complex_correlation["peak_values"]
+        detection_result.update(phase_estimation_result)
+
+    if detection_result["detected"] and run_demodulation:
         phase_estimation = float(detection_result.get("_initial_phase_for_viterbi_rad", 0.0))
         if not np.isfinite(phase_estimation):
             phase_estimation = 0.0
 
-        rx_for_demod = signal[int(signal_start_sample):]
+        rx_for_demod = signal_for_demod[int(start_sample_for_demod):]
         if n_symbols is None:
             n_symbols = max(0, int(np.ceil(len(rx_for_demod) / sps)))
         demod_config = build_viterbi_config(params=params, n_symbols=int(n_symbols),
@@ -951,6 +1264,7 @@ def pipeline(signal: np.ndarray, middle_cpfsk_uw: np.ndarray, params: dict,
         "frequency_estimation": frequency_estimation,
         "coarse_frequency_estimation": coarse_frequency_estimation,
         "fine_frequency_estimation": fine_frequency_estimation_result,
+        "timing_estimation": timing_estimation,
         "demodulation": demodulation,
         "differential_demodulation": differential_demodulation_bits,
         "timing_sec": timing_sec,

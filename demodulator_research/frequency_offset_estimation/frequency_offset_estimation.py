@@ -11,7 +11,6 @@ class FrequencyOffsetEstimator:
         self.method_type = method_type
         self.reference_signal = reference_signal
 
-
     @staticmethod
     def normalized_correlation(signal: np.ndarray, uw: np.ndarray) -> np.ndarray:
         non_normalized_correlation = sp.convolve(signal, np.conj(uw[::-1]))
